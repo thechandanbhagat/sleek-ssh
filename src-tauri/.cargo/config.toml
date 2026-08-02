@@ -1,0 +1,2 @@
+[env]
+CFLAGS_x86_64_pc_windows_msvc = { value = "-DLIBSSH2_ECDSA_WINCNG", force = true }
