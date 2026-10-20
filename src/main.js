@@ -475,7 +475,10 @@ async function initProfileList() {
   }
 }
 
+let savedSessionFolderSequence = 0;
+
 function renderProfiles() {
+  savedSessionFolderSequence = 0;
   if (savedProfiles.length === 0) {
     profilesList.innerHTML = `<div class="empty-state">No saved profiles. Click "+" to add.</div>`;
     return;
@@ -519,32 +522,47 @@ function getNamespaceProfileCount(namespaceNode) {
     .reduce((count, childNode) => count + getNamespaceProfileCount(childNode), 0);
 }
 
+function savedSessionFolderStorageKey(namespaceKey) {
+  return `folder_collapsed_${namespaceKey}`;
+}
+
+function readSavedSessionFolderCollapsed(namespaceKey) {
+  return localStorage.getItem(savedSessionFolderStorageKey(namespaceKey)) === "true";
+}
+
+function applySavedSessionFolderState(folderEl, expanded) {
+  folderEl.classList.toggle("collapsed", !expanded);
+  folderEl.querySelector(".folder-header").setAttribute("aria-expanded", String(expanded));
+  folderEl.querySelector(".folder-state").textContent = expanded ? "Expanded" : "Collapsed";
+}
+
 function appendNamespaceFolders(namespaceNode, parentElement, namespacePath = []) {
   [...namespaceNode.children.entries()]
     .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
     .forEach(([namespaceName, childNode]) => {
       const childPath = [...namespacePath, namespaceName];
       const namespaceKey = childPath.join(NAMESPACE_SEPARATOR);
+      const contentId = `saved-session-folder-${savedSessionFolderSequence += 1}`;
       const folderEl = document.createElement("div");
       folderEl.className = "profile-folder";
 
-      if (localStorage.getItem(`folder_collapsed_${namespaceKey}`) === "true") {
-        folderEl.classList.add("collapsed");
-      }
-
       folderEl.innerHTML = `
-        <div class="folder-header">
-          <svg class="folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <button class="folder-header" type="button" aria-expanded="true" aria-controls="${contentId}">
+          <svg class="folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
           </svg>
-          <span class="folder-name">${escapeHtml(namespaceName)}</span>
+          <span class="folder-heading">
+            <span class="folder-name">${escapeHtml(namespaceName)}</span>
+            <span class="folder-state" aria-hidden="true"></span>
+          </span>
           <span class="folder-count">(${getNamespaceProfileCount(childNode)})</span>
-          <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <polyline points="6 9 12 15 18 9"></polyline>
           </svg>
-        </div>
-        <div class="folder-content"></div>
+        </button>
+        <div class="folder-content" id="${contentId}"></div>
       `;
+      applySavedSessionFolderState(folderEl, !readSavedSessionFolderCollapsed(namespaceKey));
 
       const contentElement = folderEl.querySelector(".folder-content");
       childNode.profiles.forEach(profile => {
@@ -553,8 +571,9 @@ function appendNamespaceFolders(namespaceNode, parentElement, namespacePath = []
       appendNamespaceFolders(childNode, contentElement, childPath);
 
       folderEl.querySelector(".folder-header").addEventListener("click", () => {
-        const isCollapsed = folderEl.classList.toggle("collapsed");
-        localStorage.setItem(`folder_collapsed_${namespaceKey}`, isCollapsed);
+        const collapsed = !folderEl.classList.contains("collapsed");
+        applySavedSessionFolderState(folderEl, !collapsed);
+        localStorage.setItem(savedSessionFolderStorageKey(namespaceKey), String(collapsed));
       });
 
       parentElement.appendChild(folderEl);
