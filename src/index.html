@@ -10,6 +10,8 @@
     <link rel="icon" type="image/png" href="assets/sleekssh-icon.png" />
     <link rel="stylesheet" href="assets/xterm.css" />
     <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="terminal-interactions.css" />
+  <link rel="stylesheet" href="sudo-interactions.css" />
     <script src="assets/xterm.js"></script>
     <script src="assets/addon-fit.js"></script>
     <script type="module" src="/main.js" defer></script>
@@ -47,7 +49,7 @@
     </div>
     <div class="app-container">
       <!-- SIDEBAR -->
-      <aside class="sidebar">
+      <aside class="sidebar" id="sidebar-panel">
         <div class="sidebar-header">
           <div class="logo">
             <img class="logo-icon" src="assets/sleekssh-icon.png" alt="" />
@@ -57,6 +59,7 @@
 
         <nav class="sidebar-tabs">
           <button class="nav-tab active" data-tab="connections">Connections</button>
+          <button class="nav-tab" data-tab="terminal">Terminal</button>
           <button class="nav-tab hidden" data-tab="vpn">VPN</button>
           <button class="nav-tab" data-tab="keys">Keys</button>
         </nav>
@@ -76,6 +79,33 @@
             <div class="profiles-list" id="profiles-list">
               <!-- Dynamically populated profiles -->
               <div class="empty-state">No saved profiles. Click "+" to add.</div>
+            </div>
+          </div>
+
+          <div class="tab-pane" id="pane-terminal">
+            <div class="pane-header">
+              <h3>Local Terminal</h3>
+            </div>
+            <div class="local-terminal-section">
+              <p class="local-terminal-description">Open a shell inside SleekSSH without switching to a separate terminal window.</p>
+              <div class="local-terminal-actions" role="group" aria-label="Choose a local shell">
+                <button class="btn btn-primary btn-full local-terminal-button" id="btn-open-powershell" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <polyline points="4 17 10 11 4 5"></polyline>
+                    <line x1="12" y1="19" x2="20" y2="19"></line>
+                  </svg>
+                  Open PowerShell
+                </button>
+                <button class="btn btn-secondary btn-full local-terminal-button" id="btn-open-command-prompt" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+                    <polyline points="7 9 10 12 7 15"></polyline>
+                    <line x1="12" y1="15" x2="17" y2="15"></line>
+                  </svg>
+                  Open Command Prompt
+                </button>
+              </div>
+              <p class="helper-text">Global shortcut: Ctrl+Alt+T opens PowerShell from anywhere.</p>
             </div>
           </div>
 
@@ -155,12 +185,16 @@
 
         </div>
       </aside>
+      <div id="sidebar-resize-handle" class="panel-resize-handle sidebar-resize-handle" role="separator" tabindex="0" aria-label="Resize sidebar" aria-orientation="vertical" aria-controls="sidebar-panel"></div>
 
       <!-- MAIN WORKSPACE -->
       <main class="main-workspace">
         <!-- TAB BAR -->
         <header class="tab-bar">
-          <div class="tabs-container" id="tabs-container">
+          <button class="panel-toggle-button" id="btn-sidebar-toggle" type="button" aria-label="Hide sidebar" aria-expanded="true" aria-controls="sidebar-panel" title="Hide sidebar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><line x1="9" y1="4" x2="9" y2="20"></line></svg>
+          </button>
+          <div class="tabs-container" id="tabs-container" role="tablist" aria-label="Open workspaces">
             <!-- Dynamically populated terminal tabs -->
           </div>
           <button class="btn-new-tab" id="btn-new-tab-plus" title="Quick Connect (Ctrl+Alt+N)" aria-label="Quick Connect">
@@ -179,6 +213,7 @@
               <h2>Welcome to SleekSSH</h2>
               <p>A secure, multi-session SSH terminal utility.</p>
               <div class="welcome-actions">
+                <button class="btn btn-secondary" id="welcome-btn-terminal">Open Local Terminal</button>
                 <button class="btn btn-primary" id="welcome-btn-new">Quick Connect</button>
                 <button class="btn btn-secondary" id="welcome-btn-add">Add Connection Profile</button>
               </div>
@@ -318,6 +353,26 @@
               <input type="password" id="prof-password" placeholder="Password for authentication" />
             </div>
           </div>
+
+          <fieldset class="sudo-settings">
+            <legend>Sudo password shortcut</legend>
+            <label class="sudo-checkbox-label" for="prof-sudo-shortcut">
+              <input type="checkbox" id="prof-sudo-shortcut" />
+              Enable F2 three times at a sudo prompt
+            </label>
+            <p class="helper-text">For standard sudo password prompts in Bash/Zsh. Press F2 three times within two seconds. Reconnect on a verified SSH server after enabling.</p>
+            <div class="form-group">
+              <label for="prof-sudo-password">Separate sudo password</label>
+              <input type="password" id="prof-sudo-password" autocomplete="new-password" placeholder="Enter sudo password" aria-describedby="prof-sudo-password-status" />
+              <p class="helper-text" id="prof-sudo-password-status" role="status">No sudo password saved.</p>
+            </div>
+            <label class="sudo-checkbox-label hidden" id="prof-delete-sudo-password-label" for="prof-delete-sudo-password">
+              <input type="checkbox" id="prof-delete-sudo-password" />
+              Remove the saved sudo password
+            </label>
+          </fieldset>
+
+          <p class="profile-save-error hidden" id="profile-save-error" role="alert"></p>
 
           <div class="modal-footer">
             <button type="button" class="btn btn-secondary" id="btn-cancel-modal">Cancel</button>
