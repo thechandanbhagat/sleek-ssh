@@ -1,4 +1,10 @@
 mod commands;
+mod automation;
+mod automation_mcp;
+mod automation_provider;
+mod automation_sessions;
+mod automation_ssh;
+mod automation_sudo_consent;
 mod connection;
 mod local_terminal;
 mod ssh_security;
@@ -31,11 +37,26 @@ fn activate_terminal_shortcut(app: &tauri::AppHandle) -> Result<(), tauri::Error
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(automation_mcp::BRIDGE_ARGUMENT)) {
+        if let Err(error) = automation_mcp::run_stdio_bridge() {
+            eprintln!("SleekSSH automation bridge: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     tauri::Builder::default()
+        .manage(automation::AutomationState::default())
         .manage(Mutex::new(HashMap::<String, SshConnection>::new()))
         .manage(Mutex::new(HashMap::<String, LocalTerminal>::new()))
         .manage(Arc::new(Mutex::new(None::<u32>)))
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                if let Err(error) = automation::shutdown(&window.state::<automation::AutomationState>()) {
+                    eprintln!("Cannot stop automation while closing SleekSSH: {error}");
+                }
+            }
+        })
         .setup(|app| {
             #[cfg(desktop)]
             {
@@ -69,6 +90,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            automation::list_automation_providers,
+            automation::start_ssh_automation,
+            automation::stop_ssh_automation,
+            automation::respond_automation_approval,
+            automation::respond_automation_sudo_consent,
+            automation_sessions::list_local_agent_sessions,
             commands::select_key_file,
             commands::get_default_ssh_keys,
             commands::generate_new_ssh_key,

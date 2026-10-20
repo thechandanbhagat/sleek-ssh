@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "noEmitOnError": true,
+    "rootDir": "src",
+    "outDir": "src/generated"
+  },
+  "include": ["src/automation.ts"]
+}

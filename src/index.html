@@ -12,8 +12,10 @@
     <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="terminal-interactions.css" />
   <link rel="stylesheet" href="sudo-interactions.css" />
+    <link rel="stylesheet" href="automation.css" />
     <script src="assets/xterm.js"></script>
     <script src="assets/addon-fit.js"></script>
+    <script type="module" src="/generated/automation.js" defer></script>
     <script type="module" src="/main.js" defer></script>
   </head>
 
@@ -203,6 +205,7 @@
               <line x1="5" y1="12" x2="19" y2="12"></line>
             </svg>
           </button>
+          <button class="btn btn-secondary automation-toggle" id="btn-automation-toggle" type="button" aria-expanded="false" aria-controls="automation-panel">Automation</button>
         </header>
 
         <!-- TERMINAL WORKSPACES -->
@@ -221,6 +224,50 @@
           </div>
           <!-- Terminal viewports are dynamically injected here -->
         </div>
+        <section class="automation-panel" id="automation-panel" aria-labelledby="automation-title" hidden>
+          <header class="automation-header">
+            <div><h2 id="automation-title">SSH automation</h2><p id="automation-target">Select a connected SSH server.</p></div>
+            <button class="btn btn-secondary" id="automation-close" type="button" aria-label="Hide SSH automation">Hide</button>
+          </header>
+          <div class="automation-body">
+            <form class="automation-form" id="automation-form">
+              <div class="automation-provider-field">
+                <label for="automation-provider">Local agent</label>
+                <div class="automation-provider-controls"><select id="automation-provider" aria-describedby="automation-provider-help"><option value="claude">Claude Code</option><option value="codex">Codex</option></select><button class="btn btn-secondary" id="automation-refresh" type="button">Refresh</button></div>
+                <p id="automation-provider-help">Checking local agents…</p>
+              </div>
+              <div class="automation-conversation-field">
+                <label for="automation-chat">Local chat</label>
+                <div class="automation-provider-controls"><select id="automation-chat" aria-describedby="automation-chat-help automation-conversation-help"><option value="">New chat</option></select><button class="btn btn-secondary" id="automation-refresh-chats" type="button">Refresh chats</button></div>
+                <p id="automation-chat-help" role="status" aria-live="polite">Saved chats load when you open automation.</p>
+                <details id="automation-manual-chat"><summary>Advanced: conversation ID</summary><div class="automation-manual-controls"><label for="automation-conversation">Conversation ID (optional)</label><div class="automation-provider-controls"><input id="automation-conversation" type="text" maxlength="36" autocomplete="off" spellcheck="false" aria-describedby="automation-conversation-help" placeholder="Paste an existing chat UUID" /><button class="btn btn-secondary" id="automation-new-chat" type="button" title="Start a new chat for this server; keeps existing CLI history">New chat</button></div><p id="automation-conversation-help">Use a saved, idle chat; leave blank to start one.</p></div></details>
+              </div>
+              <label for="automation-prompt">Task for the selected server</label>
+              <textarea id="automation-prompt" rows="3" maxlength="16000" placeholder="Inspect why nginx is failing and propose a fix." required></textarea>
+              <div class="automation-actions"><button class="btn btn-primary" id="automation-start" type="submit" disabled>Run task</button><button class="btn btn-secondary" id="automation-stop" type="button" disabled>Stop</button></div>
+              <p class="automation-guidance" id="automation-stop-help" hidden>Stop closes the agent and its command channel. Detached remote processes may continue.</p>
+            </form>
+            <div class="automation-results">
+              <p class="automation-status" id="automation-status" role="status" aria-live="polite">Select a connected SSH server to begin.</p>
+              <p class="automation-status automation-sudo-status" id="automation-sudo-status" role="status" aria-live="polite" hidden></p>
+              <div class="automation-approval" id="automation-sudo-approval" role="region" aria-labelledby="automation-sudo-title" hidden>
+                <strong id="automation-sudo-title">Use saved sudo password for this run?</strong>
+                <p id="automation-sudo-target"></p>
+                <p id="automation-sudo-message"></p>
+                <pre id="automation-sudo-command" tabindex="0"></pre>
+                <p class="automation-guidance">SleekSSH supplies the saved password to sudo on this server for this run. Claude/Codex never receives it. Each remote command still needs your approval.</p>
+                <div class="automation-actions"><button class="btn btn-primary" id="automation-sudo-allow" type="button">Allow for this run</button><button class="btn btn-secondary" id="automation-sudo-deny" type="button">Deny</button></div>
+              </div>
+              <div class="automation-approval" id="automation-approval" role="region" aria-label="Remote command approval" hidden>
+                <strong>Approve this remote command</strong>
+                <p id="automation-approval-target"></p>
+                <pre id="automation-command" tabindex="0"></pre>
+                <div class="automation-actions"><button class="btn btn-primary" id="automation-approve" type="button">Approve once</button><button class="btn btn-secondary" id="automation-deny" type="button">Deny</button></div>
+              </div>
+              <div class="automation-output" id="automation-output" role="region" tabindex="0" aria-label="Automation output">Agent output will appear here.</div>
+            </div>
+          </div>
+        </section>
       </main>
     </div>
 

@@ -6,6 +6,7 @@ let savedProfiles = [];
 let savedVpnProfiles = [];
 let activeSessions = {}; // sessionId -> { id, name, host, term, fitAddon, container, isClosed }
 let activeTabId = null;
+let automationPanel = null;
 let vpnOperationCancelRequested = false;
 let vpnConnectionActive = false;
 let vpnControlsBusy = false;
@@ -687,7 +688,36 @@ window.addEventListener("DOMContentLoaded", () => {
   initWorkspace();
   initSessionShortcuts();
   initPortKiller();
+  initAutomationPanel();
 });
+
+function initAutomationPanel() {
+  if (!window.SleekSshAutomation) {
+    document.getElementById("btn-automation-toggle")?.addEventListener("click", () => {
+      showNotification("SSH automation could not load. Rebuild SleekSSH with npm run tauri.");
+    });
+    return;
+  }
+  automationPanel = window.SleekSshAutomation.initAutomation({
+    invoke,
+    listen,
+    getSelectedTarget: () => {
+      const session = activeSessions[activeTabId];
+      if (!session || session.kind !== "ssh" || !session.connectionId || session.connectionStatus !== "connected"
+        || session.isClosed || session.isClosing || session.isConnecting) return null;
+      const profile = session.connectionProfile;
+      return {
+        sessionId: session.connectionId,
+        contextKey: JSON.stringify([profile.id || "", profile.username, session.host, profile.port]),
+        label: `${session.name} · ${profile.username}@${session.host}:${profile.port}`
+      };
+    },
+    onLayoutChange: () => {
+      const session = activeSessions[activeTabId];
+      if (session?.term) requestAnimationFrame(() => fitTerminal(session));
+    }
+  });
+}
 
 // --- PANEL LAYOUT ---
 const PANEL_LAYOUT_STORAGE_KEY = "sleekssh_panel_layout";
@@ -2252,6 +2282,7 @@ function switchTab(sessionId) {
     resetSudoShortcut(activeSessions[sessionId], false);
   }
   activeTabId = sessionId;
+  automationPanel?.refresh();
 
   // Update Tab Elements UI
   document.querySelectorAll(".terminal-tab").forEach(tab => {
@@ -2606,6 +2637,7 @@ async function closeTab(sessionId) {
   } else {
     activeTabId = null;
     welcomeScreen.classList.remove("hidden");
+    automationPanel?.refresh();
   }
 }
 
@@ -2656,6 +2688,7 @@ function initSessionToolbar(session) {
 }
 
 function updateSessionToolbar(session) {
+  automationPanel?.refresh();
   const toolbar = session.container.querySelector(".session-toolbar");
   if (!toolbar) return;
   const status = session.kind === "ssh" ? session.connectionStatus || "connecting"

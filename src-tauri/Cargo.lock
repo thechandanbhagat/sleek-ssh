@@ -4164,6 +4164,7 @@ name = "tauri-app"
 version = "0.1.1"
 dependencies = [
  "base64 0.21.7",
+ "chrono",
  "dirs 5.0.1",
  "portable-pty",
  "rand",
