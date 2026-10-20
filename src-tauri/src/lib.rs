@@ -1,5 +1,6 @@
 mod commands;
 mod connection;
+mod ssh_security;
 mod vpn;
 
 use connection::SshConnection;
@@ -21,6 +22,10 @@ pub fn run() {
             commands::generate_new_ssh_key,
             commands::load_connections,
             commands::save_connections,
+            commands::save_sudo_password,
+            commands::delete_sudo_password,
+            commands::send_sudo_password,
+            commands::trust_ssh_host,
             commands::connect_ssh,
             commands::write_ssh,
             commands::resize_ssh,
