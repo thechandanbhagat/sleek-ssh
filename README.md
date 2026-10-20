@@ -1,106 +1,120 @@
-# SleekSSH & VPN Terminal Utility
+# SleekSSH
 
-A lightweight, modern desktop application combining a full-featured SSH terminal client, SFTP file browser, and Cisco VPN profile manager. Built with Tauri, Rust, and xterm.js.
+A Windows desktop workspace for SSH sessions, local terminals, SFTP, and command-by-command Claude Code or Codex automation.
 
-![App Icon](src/assets/sleekssh-icon.png)
+<!-- Documentation owner: repository maintainers. Reviewed for v0.2.0 on 2026-10-20; review on every release. -->
 
-## Features
+## Quick start
 
-### 🖥️ SSH Terminal
-- **xterm.js Integration:** Full terminal emulation supporting standard ANSI escapes, colors, and keybindings.
-- **Responsive Layout:** Automatically handles terminal resizing (`resize_ssh`) on window size changes.
-- **Session Management:** Securely store and load connections using Windows DPAPI encryption.
+1. Install **SleekSSH v0.2.0** for Windows x64: [MSI installer](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.2.0/SleekSSH_0.2.0_x64_en-US.msi) or [EXE installer](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.2.0/SleekSSH_0.2.0_x64-setup.exe).
+2. Launch SleekSSH. In **Terminal**, open PowerShell or Command Prompt; use **Connections** to add an SSH profile with your server, username, and password or private key.
+3. For a new SSH server, compare its displayed fingerprint with a trusted source before accepting it.
 
-### 📁 SFTP File Manager
-- **Remote Operations:** Browse remote directories, list files, and view metadata.
-- **File Actions:** Download, upload, delete files/directories, and create folders directly from the interface.
-- **File Dialogs:** Native file picker integration via Tauri for uploads and download destinations.
+While SleekSSH is running, **Ctrl+Alt+T** brings it forward and opens PowerShell. The app registers itself to launch at Windows startup.
 
-### 🔒 SSH Key Management
-- **Key Generation:** Generate new secure SSH keypairs directly within the app.
-- **Auto-Discovery:** Automatically scans default paths (`~/.ssh`) to list existing private keys.
-- **Import Key:** Easily select custom private key files using native dialogs.
+See the [release notes](RELEASE_NOTES.md) and [all releases](https://github.com/thechandanbhagat/sleek-ssh/releases).
 
-### 🌐 Cisco VPN Integration
-- **Profile Swapper:** Detects and lists installed Cisco AnyConnect profiles on the host machine.
-- **One-Click Switch:** Switch VPN profiles or disconnect from the UI, with automatic CLI tracking.
-- **Status Monitoring:** Tracks VPN connection state and manages credentials securely.
+## Screenshots
 
-### Local Claude/Codex automation
+![SleekSSH workspace with connection folders, terminal tabs, and SFTP](docs/screenshots/workspace.png)
 
-Connect to an SSH server, select its terminal tab, and open **Automation**. Choose **Claude Code** or **Codex**, enter a task, and select **Run task**. Review each proposed command and choose **Approve once** or **Deny**. Output and results appear in the panel.
+The workspace uses sample connections, terminal output, and remote files.
 
-Agent responses render Markdown headings, lists, tables, links, and code blocks. Remote command output stays literal and monospaced. Web and email links open in their default application; embedded HTML is shown as text and images are not fetched.
+![SleekSSH automation panel with a conversation and command approval](docs/screenshots/automation.png)
 
-Choose a saved conversation from **Local chat**, or select **New chat** to start fresh. The list follows the selected provider and shows available titles, project paths, and update times, newest first. **Refresh chats** reloads local metadata; **Advanced** retains manual UUID entry when needed. SleekSSH records the CLI's returned ID and automatically resumes it for later tasks on the same server and provider. **New chat** clears that association without deleting CLI history. Use an idle saved chat rather than a conversation currently running in another terminal. The app uses `claude --print --resume <UUID>` or `codex exec ... resume <UUID> -`, with the SSH bridge and command approvals supplied again on every invocation.
+The automation view uses a sample conversation and command approval.
 
-Chat discovery reads local metadata from `CLAUDE_CONFIG_DIR` (default `~/.claude`) or `CODEX_HOME` (default `~/.codex`). It does not start the CLI, call a model, or load full conversations. Results are limited to 200 chats, with a notice when discovery is partial. A saved conversation that is absent from the latest listing stays selectable by its ID.
+## Your workspace
 
-The native CLI runs locally with its configured authentication; SleekSSH adds no OAuth sign-in. Install and configure Claude Code or Codex before starting SleekSSH; use **Refresh** after installation, or restart the app if PATH changed. This integration was verified with Claude Code 2.1.268 and Codex CLI 0.154.0. Older versions that lack the isolation flags need updating. Conversation history is retained by the CLI; SleekSSH stores only conversation IDs per server/provider and uses a stable local application-data workspace.
+- **SSH and local terminals:** Keep remote sessions, PowerShell, and Command Prompt in separate tabs. Reconnect a disconnected SSH session from its terminal toolbar.
+- **Connections and layout:** Organize saved connections in nested folders. Folder collapse state, sidebar width, and SFTP pane width are remembered.
+- **Terminal controls:** Copy with **Ctrl+Shift+C**, paste with **Ctrl+Shift+V**, and search with **Ctrl+F**. A context menu also provides copy, paste, and selection controls.
+- **SFTP:** Browse remote directories, upload and download files through native file dialogs, create folders, and delete remote files or directories.
+- **SSH keys:** Discover private keys in `~/.ssh`, select a custom key, or generate a new keypair.
+- **Optional Cisco VPN:** Enable **VPN Switcher Tab** in Settings; it is hidden by default. With Cisco Secure Client or AnyConnect installed, import profile shortcuts, switch connections, disconnect, and check status.
 
-Automation uses the selected connection's existing authenticated SSH session through a local, per-run authenticated MCP bridge. The target stays fixed when tabs change. Disconnecting or reconnecting ends that run; start a new task for the new connection. Neither CLI needs installing on the server, and SSH credentials are not passed to the CLI.
+Saved connection and VPN credentials use Windows DPAPI encryption. SSH server trust is checked before authentication; a changed host key blocks the connection and displays both the saved and presented fingerprints.
 
-Elevated commands are marked **[sudo]** in command approval. The first time a saved password is needed, choose **Allow for this run** or **Deny**. Allowing reuses the separate saved sudo password configured for the connection's F2 shortcut; enable that setting and reconnect before starting automation. Later password requests in the same run are handled automatically, while each command still needs approval. Passwordless or cached sudo does not load the saved password. Consent ends with the run or Stop, and missing, changed, or rejected credentials require correcting the profile and starting a new run. Passwords stay inside the native app and are never included in agent input, logs, or tool results. Sudo authentication that requires an interactive terminal or additional factors is not supported.
+### Saved sudo password
 
-Commands run in separate noninteractive remote shells, so use explicit `cd` commands where needed. Commands have a 120-second limit and bounded output; command approval requests expire after five minutes, saved-password consent expires after 90 seconds, and runs stop after twenty minutes. One automation run can be active at a time. **Stop** terminates the local agent and closes its remote command channel; detached remote processes may continue.
+Edit a connection, save a **separate sudo password**, enable its shortcut, and reconnect. At a recognized standard Bash/Zsh sudo password prompt, press **F2 three times within two seconds** to submit it. The password is encrypted with Windows DPAPI.
 
----
+## Claude Code and Codex automation
 
-## Technology Stack
+### Start a task
 
-- **Frontend:** HTML5, Vanilla CSS, Vanilla JavaScript
-- **Terminal Emulator:** [xterm.js](https://xtermjs.org/) (with Fit Addon)
-- **Framework:** [Tauri v2](https://v2.tauri.app/) (Desktop Application Framework)
-- **Backend:** Rust (async handling using `tokio`, SSH connection via `ssh2`, DPAPI encryption, and system command interfaces)
+1. Install and authenticate Claude Code or Codex locally before starting SleekSSH. Use **Refresh** after installing a CLI; restart SleekSSH after changing PATH.
+2. Connect to an SSH server, select its terminal tab, and open **Automation**.
+3. Choose the provider, enter your task, and select **Run task**.
+4. Review every proposed remote command and choose **Approve once** or **Deny**.
 
----
+The CLI runs locally with its configured authentication; SleekSSH adds no OAuth sign-in. Neither CLI needs installing on the remote server, and SSH credentials are not passed to the CLI. This integration was verified with Claude Code **2.1.268** and Codex CLI **0.154.0**; older versions without the required isolation flags need updating.
 
-## Development & Setup
+Agent responses support Markdown headings, lists, tables, links, and code blocks. Remote command output stays literal and monospaced. Web and email links open in their default application; embedded HTML is displayed as text and images are not fetched.
 
-### Prerequisites
+### Resume local chats
 
-To build and run this application locally, you will need:
-1. **Node.js** (v22.18 or higher for the TypeScript test runner)
-2. **Rust & Cargo** (latest stable release)
-3. **Tauri Prerequisites** (System dependencies depending on your platform; see the [Tauri Getting Started Guide](https://v2.tauri.app/start/prerequisites/))
+Choose an idle saved conversation from **Local chat**, or select **New chat**. The list follows the selected provider and shows titles, project paths, and update times, newest first. **Refresh chats** reloads local metadata; **Advanced** allows manual UUID entry.
 
-### Installation
+SleekSSH stores the CLI's returned conversation ID per server and provider and resumes it for later tasks. **New chat** clears that association without deleting CLI history. A saved ID remains selectable when absent from the latest listing. Conversation history stays with the CLI; SleekSSH stores only the IDs and uses a stable local application-data workspace.
 
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/thechandanbhagat/terminal-utility.git
-   cd terminal-utility
-   ```
+Discovery reads metadata without starting a CLI, calling a model, or loading full conversations. Lists are limited to 200 chats, with a notice when discovery is partial. Use a conversation that is idle in other terminals. Resumption uses `claude --print --resume <UUID>` or `codex exec ... resume <UUID> -`; SleekSSH supplies its SSH bridge and command approvals on every invocation.
 
-2. Install npm dependencies:
-   ```bash
-   npm install
-   ```
+### Approve sudo use
 
-### Running the App
+Elevated commands are marked **[sudo]** during command approval. When a saved password is first needed, choose **Allow for this run** or **Deny**. Allowing uses the connection's enabled saved sudo password; configure it and reconnect before starting automation.
 
-Start the Tauri development server:
-```bash
+Later password requests in that run are handled automatically, while **each command still needs approval**. Passwordless or cached sudo does not load the saved password. Consent ends with the run or **Stop**. Missing, changed, or rejected credentials require fixing the connection profile and starting a new run.
+
+Passwords stay inside the native app and are excluded from agent input, logs, and tool results. Automation does not support sudo authentication that requires an interactive terminal or additional factors.
+
+### Execution limits
+
+- One run can be active at a time. It uses the selected connection's authenticated SSH session through a local, per-run authenticated MCP bridge.
+- The target stays fixed when tabs change. Disconnecting or reconnecting ends the run; start a new task for the new connection.
+- Commands use separate noninteractive remote shells, so include an explicit `cd` when needed. Each command has a **120-second** limit and bounded output.
+- Command approvals expire after **five minutes**, saved-password consent after **90 seconds**, and runs after **twenty minutes**.
+- **Stop** terminates the local agent and closes its remote command channel. Detached remote processes may continue.
+
+## Configuration
+
+Set environment variables before launching SleekSSH.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Root for Claude Code chat metadata discovery. |
+| `CODEX_HOME` | `~/.codex` | Root for Codex chat metadata discovery. |
+| `CISCO_VPNCLI_PATH` | Auto-detected | Optional full path to `vpncli.exe`; checked before installed Cisco locations and PATH. |
+
+## Development
+
+The current release targets **Windows x64**. Credential storage uses Windows DPAPI and local shells use Windows executables; macOS and Linux are not supported by this release.
+
+Install **Node.js 22.18 or newer**, **stable Rust and Cargo**, and the [Windows Tauri prerequisites](https://v2.tauri.app/start/prerequisites/), including the C++ build tools and WebView2 runtime.
+
+```powershell
+git clone https://github.com/thechandanbhagat/sleek-ssh.git
+cd sleek-ssh
+npm ci
 npm run tauri dev
 ```
 
-The npm command compiles the automation TypeScript module before launching Tauri. Use it instead of invoking the Tauri binary directly. Generated files under `src/generated/` are ignored by Git.
+Build installers:
 
-### Building the Production App
-
-To package the application for production:
-```bash
+```powershell
 npm run tauri build
 ```
 
-### Tests
+Run the frontend and Rust tests:
 
-```bash
+```powershell
 npm test
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 ```
 
----
+Use the npm Tauri commands so the automation TypeScript is checked and compiled before Tauri starts. Generated files in `src/generated/` are ignored by Git.
+
+The app uses **Tauri v2**, **Rust**, **Tokio**, and **ssh2**, with an HTML/CSS and JavaScript frontend, TypeScript automation modules, **xterm.js**, and **markdown-it**.
 
 ## License
 
