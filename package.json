@@ -1,16 +1,23 @@
 {
   "name": "tauri-app",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
-    "tauri": "tauri"
+    "build:frontend": "tsc -p tsconfig.automation.json --noEmit && node scripts/build-frontend.ts",
+    "test": "npm run build:frontend && node --test tests/*.test.ts",
+    "tauri": "npm run build:frontend && tauri"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2"
+    "@tauri-apps/cli": "^2",
+    "@types/markdown-it": "^14.2.0",
+    "esbuild": "^0.28.2",
+    "linkedom": "^0.18.13",
+    "typescript": "^7.0.2"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
-    "@xterm/xterm": "^6.0.0"
+    "@xterm/xterm": "^6.0.0",
+    "markdown-it": "^15.0.3"
   }
 }

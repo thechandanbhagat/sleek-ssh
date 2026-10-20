@@ -10,8 +10,12 @@
     <link rel="icon" type="image/png" href="assets/sleekssh-icon.png" />
     <link rel="stylesheet" href="assets/xterm.css" />
     <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="terminal-interactions.css" />
+  <link rel="stylesheet" href="sudo-interactions.css" />
+    <link rel="stylesheet" href="automation.css" />
     <script src="assets/xterm.js"></script>
     <script src="assets/addon-fit.js"></script>
+    <script type="module" src="/generated/automation.js" defer></script>
     <script type="module" src="/main.js" defer></script>
   </head>
 
@@ -47,7 +51,7 @@
     </div>
     <div class="app-container">
       <!-- SIDEBAR -->
-      <aside class="sidebar">
+      <aside class="sidebar" id="sidebar-panel">
         <div class="sidebar-header">
           <div class="logo">
             <img class="logo-icon" src="assets/sleekssh-icon.png" alt="" />
@@ -57,6 +61,7 @@
 
         <nav class="sidebar-tabs">
           <button class="nav-tab active" data-tab="connections">Connections</button>
+          <button class="nav-tab" data-tab="terminal">Terminal</button>
           <button class="nav-tab hidden" data-tab="vpn">VPN</button>
           <button class="nav-tab" data-tab="keys">Keys</button>
         </nav>
@@ -76,6 +81,33 @@
             <div class="profiles-list" id="profiles-list">
               <!-- Dynamically populated profiles -->
               <div class="empty-state">No saved profiles. Click "+" to add.</div>
+            </div>
+          </div>
+
+          <div class="tab-pane" id="pane-terminal">
+            <div class="pane-header">
+              <h3>Local Terminal</h3>
+            </div>
+            <div class="local-terminal-section">
+              <p class="local-terminal-description">Open a shell inside SleekSSH without switching to a separate terminal window.</p>
+              <div class="local-terminal-actions" role="group" aria-label="Choose a local shell">
+                <button class="btn btn-primary btn-full local-terminal-button" id="btn-open-powershell" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <polyline points="4 17 10 11 4 5"></polyline>
+                    <line x1="12" y1="19" x2="20" y2="19"></line>
+                  </svg>
+                  Open PowerShell
+                </button>
+                <button class="btn btn-secondary btn-full local-terminal-button" id="btn-open-command-prompt" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+                    <polyline points="7 9 10 12 7 15"></polyline>
+                    <line x1="12" y1="15" x2="17" y2="15"></line>
+                  </svg>
+                  Open Command Prompt
+                </button>
+              </div>
+              <p class="helper-text">Global shortcut: Ctrl+Alt+T opens PowerShell from anywhere.</p>
             </div>
           </div>
 
@@ -155,12 +187,16 @@
 
         </div>
       </aside>
+      <div id="sidebar-resize-handle" class="panel-resize-handle sidebar-resize-handle" role="separator" tabindex="0" aria-label="Resize sidebar" aria-orientation="vertical" aria-controls="sidebar-panel"></div>
 
       <!-- MAIN WORKSPACE -->
       <main class="main-workspace">
         <!-- TAB BAR -->
         <header class="tab-bar">
-          <div class="tabs-container" id="tabs-container">
+          <button class="panel-toggle-button" id="btn-sidebar-toggle" type="button" aria-label="Hide sidebar" aria-expanded="true" aria-controls="sidebar-panel" title="Hide sidebar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><line x1="9" y1="4" x2="9" y2="20"></line></svg>
+          </button>
+          <div class="tabs-container" id="tabs-container" role="tablist" aria-label="Open workspaces">
             <!-- Dynamically populated terminal tabs -->
           </div>
           <button class="btn-new-tab" id="btn-new-tab-plus" title="Quick Connect (Ctrl+Alt+N)" aria-label="Quick Connect">
@@ -169,6 +205,7 @@
               <line x1="5" y1="12" x2="19" y2="12"></line>
             </svg>
           </button>
+          <button class="btn btn-secondary automation-toggle" id="btn-automation-toggle" type="button" aria-expanded="false" aria-controls="automation-panel">Automation</button>
         </header>
 
         <!-- TERMINAL WORKSPACES -->
@@ -179,6 +216,7 @@
               <h2>Welcome to SleekSSH</h2>
               <p>A secure, multi-session SSH terminal utility.</p>
               <div class="welcome-actions">
+                <button class="btn btn-secondary" id="welcome-btn-terminal">Open Local Terminal</button>
                 <button class="btn btn-primary" id="welcome-btn-new">Quick Connect</button>
                 <button class="btn btn-secondary" id="welcome-btn-add">Add Connection Profile</button>
               </div>
@@ -186,6 +224,50 @@
           </div>
           <!-- Terminal viewports are dynamically injected here -->
         </div>
+        <section class="automation-panel" id="automation-panel" aria-labelledby="automation-title" hidden>
+          <header class="automation-header">
+            <div><h2 id="automation-title">SSH automation</h2><p id="automation-target">Select a connected SSH server.</p></div>
+            <button class="btn btn-secondary" id="automation-close" type="button" aria-label="Hide SSH automation">Hide</button>
+          </header>
+          <div class="automation-body">
+            <form class="automation-form" id="automation-form">
+              <div class="automation-provider-field">
+                <label for="automation-provider">Local agent</label>
+                <div class="automation-provider-controls"><select id="automation-provider" aria-describedby="automation-provider-help"><option value="claude">Claude Code</option><option value="codex">Codex</option></select><button class="btn btn-secondary" id="automation-refresh" type="button">Refresh</button></div>
+                <p id="automation-provider-help">Checking local agents…</p>
+              </div>
+              <div class="automation-conversation-field">
+                <label for="automation-chat">Local chat</label>
+                <div class="automation-provider-controls"><select id="automation-chat" aria-describedby="automation-chat-help automation-conversation-help"><option value="">New chat</option></select><button class="btn btn-secondary" id="automation-refresh-chats" type="button">Refresh chats</button></div>
+                <p id="automation-chat-help" role="status" aria-live="polite">Saved chats load when you open automation.</p>
+                <details id="automation-manual-chat"><summary>Advanced: conversation ID</summary><div class="automation-manual-controls"><label for="automation-conversation">Conversation ID (optional)</label><div class="automation-provider-controls"><input id="automation-conversation" type="text" maxlength="36" autocomplete="off" spellcheck="false" aria-describedby="automation-conversation-help" placeholder="Paste an existing chat UUID" /><button class="btn btn-secondary" id="automation-new-chat" type="button" title="Start a new chat for this server; keeps existing CLI history">New chat</button></div><p id="automation-conversation-help">Use a saved, idle chat; leave blank to start one.</p></div></details>
+              </div>
+              <label for="automation-prompt">Task for the selected server</label>
+              <textarea id="automation-prompt" rows="3" maxlength="16000" placeholder="Inspect why nginx is failing and propose a fix." required></textarea>
+              <div class="automation-actions"><button class="btn btn-primary" id="automation-start" type="submit" disabled>Run task</button><button class="btn btn-secondary" id="automation-stop" type="button" disabled>Stop</button></div>
+              <p class="automation-guidance" id="automation-stop-help" hidden>Stop closes the agent and its command channel. Detached remote processes may continue.</p>
+            </form>
+            <div class="automation-results">
+              <p class="automation-status" id="automation-status" role="status" aria-live="polite">Select a connected SSH server to begin.</p>
+              <p class="automation-status automation-sudo-status" id="automation-sudo-status" role="status" aria-live="polite" hidden></p>
+              <div class="automation-approval" id="automation-sudo-approval" role="region" aria-labelledby="automation-sudo-title" hidden>
+                <strong id="automation-sudo-title">Use saved sudo password for this run?</strong>
+                <p id="automation-sudo-target"></p>
+                <p id="automation-sudo-message"></p>
+                <pre id="automation-sudo-command" tabindex="0"></pre>
+                <p class="automation-guidance">SleekSSH supplies the saved password to sudo on this server for this run. Claude/Codex never receives it. Each remote command still needs your approval.</p>
+                <div class="automation-actions"><button class="btn btn-primary" id="automation-sudo-allow" type="button">Allow for this run</button><button class="btn btn-secondary" id="automation-sudo-deny" type="button">Deny</button></div>
+              </div>
+              <div class="automation-approval" id="automation-approval" role="region" aria-label="Remote command approval" hidden>
+                <strong>Approve this remote command</strong>
+                <p id="automation-approval-target"></p>
+                <pre id="automation-command" tabindex="0"></pre>
+                <div class="automation-actions"><button class="btn btn-primary" id="automation-approve" type="button">Approve once</button><button class="btn btn-secondary" id="automation-deny" type="button">Deny</button></div>
+              </div>
+              <div class="automation-output" id="automation-output" role="region" tabindex="0" aria-label="Automation output">Agent output will appear here.</div>
+            </div>
+          </div>
+        </section>
       </main>
     </div>
 
@@ -318,6 +400,26 @@
               <input type="password" id="prof-password" placeholder="Password for authentication" />
             </div>
           </div>
+
+          <fieldset class="sudo-settings">
+            <legend>Sudo password shortcut</legend>
+            <label class="sudo-checkbox-label" for="prof-sudo-shortcut">
+              <input type="checkbox" id="prof-sudo-shortcut" />
+              Enable F2 three times at a sudo prompt
+            </label>
+            <p class="helper-text">For standard sudo password prompts in Bash/Zsh. Press F2 three times within two seconds. Reconnect on a verified SSH server after enabling.</p>
+            <div class="form-group">
+              <label for="prof-sudo-password">Separate sudo password</label>
+              <input type="password" id="prof-sudo-password" autocomplete="new-password" placeholder="Enter sudo password" aria-describedby="prof-sudo-password-status" />
+              <p class="helper-text" id="prof-sudo-password-status" role="status">No sudo password saved.</p>
+            </div>
+            <label class="sudo-checkbox-label hidden" id="prof-delete-sudo-password-label" for="prof-delete-sudo-password">
+              <input type="checkbox" id="prof-delete-sudo-password" />
+              Remove the saved sudo password
+            </label>
+          </fieldset>
+
+          <p class="profile-save-error hidden" id="profile-save-error" role="alert"></p>
 
           <div class="modal-footer">
             <button type="button" class="btn btn-secondary" id="btn-cancel-modal">Cancel</button>
