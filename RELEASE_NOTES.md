@@ -1,38 +1,25 @@
-# Release Notes - SleekSSH v0.1.1
+# SleekSSH v0.2.0
 
-We are excited to announce the initial release of **SleekSSH** (v0.1.1), a lightweight, performance-focused desktop utility designed for developers, network engineers, and system administrators. 
+Released 20 October 2026.
 
-SleekSSH combines a modern terminal interface, secure file transfer capabilities, and Cisco VPN profile management into a single, cohesive application built with Tauri, Rust, and xterm.js.
+## What's new
 
----
+- **Native Windows terminals:** Open PowerShell or Command Prompt inside SleekSSH. While the app is running, **Ctrl+Alt+T** brings it forward and opens PowerShell. SleekSSH registers itself to launch at Windows startup.
+- **Workspace improvements:** Distinct tabs for SSH, local terminals, settings, and ports; terminal copy/paste, search, and context menus; resizable sidebar and SFTP panes with saved layout preferences; and nested saved-connection folders with remembered collapse state.
+- **SSH trust and reconnect:** Review server key fingerprints before trusting a new host. Changed host keys block connections and show the saved and presented fingerprints. Reconnect disconnected sessions from their terminal toolbar.
+- **Saved sudo shortcut:** Store a separate sudo password encrypted with Windows DPAPI. Enable the shortcut in the connection profile, reconnect, and press **F2 three times within two seconds** at a recognized standard Bash/Zsh sudo password prompt.
+- **Local Claude Code and Codex automation:** Run tasks against the selected SSH connection through your locally installed CLI. Approve or deny each proposed remote command, browse and resume saved local chats, and read agent responses formatted as Markdown.
+- **Sudo consent for automation:** Elevated commands are identified during approval. Choose **Allow for this run** to use the connection's enabled saved sudo password when required; each command still needs approval. Passwords remain inside the native app and are excluded from agent input, logs, and tool results.
 
-## Key Features
+## Setup and limits
 
-### 🖥️ SSH Terminal
-- **xterm.js Integration:** High-performance terminal rendering supporting native ANSI escapes, standard colors, copy-paste, and key combinations.
-- **Dynamic Resizing:** Automatically handles terminal dimension updates (`resize_ssh`) as windows are resized.
-- **Secure Persistence:** Safely store connection presets locally, encrypted with Windows DPAPI.
+Install and authenticate Claude Code or Codex locally before using automation. Refresh CLI detection after installation, or restart SleekSSH after PATH changes. The CLI runs locally; the remote server needs no agent installation.
 
-### 📁 SFTP File Manager
-- **Directory Browsing:** Full remote filesystem visibility (file types, sizes, permissions).
-- **File Transfers:** Intuitive, secure download and upload workflows integrated with native Tauri file dialog pickers.
-- **Directory Modifications:** Create folders, delete unwanted files, and manage directories recursively.
+Automation runs one task at a time against a fixed SSH connection. Commands use separate noninteractive shells, have a 120-second limit, and return bounded output. Runs stop after twenty minutes. Disconnecting or reconnecting ends the run. **Stop** terminates the local agent and closes its remote command channel; detached remote processes may continue. Sudo flows requiring an interactive terminal or additional authentication factors are unsupported in automation.
 
-### 🔑 SSH Key Management
-- **Auto-Discovery:** Automatically scans `~/.ssh` on startup to detect and list your public/private keys.
-- **Key Generation:** Generate new, secure SSH keypairs (Ed25519) within the application.
-- **Custom Key Selection:** Manually import private keys from any directory.
+## Windows x64 downloads
 
-### 🌐 Cisco VPN Integration
-- **Profile Detection:** Automatically lists existing Cisco AnyConnect profiles on the host machine.
-- **One-Click Toggles:** Instantly switch profiles or disconnect from the UI.
-- **Status Monitoring:** Reads VPN statuses and handles transitions gracefully.
+- MSI installer: `SleekSSH_0.2.0_x64_en-US.msi`
+- EXE installer: `SleekSSH_0.2.0_x64-setup.exe`
 
----
-
-## Installation & Setup
-
-1. Download the installer for your system from the [Releases Page](https://github.com/thechandanbhagat/terminal-utility/releases/tag/v0.1.1):
-   - **MSI Installer (Recommended):** `SleekSSH_0.1.0_x64_en-US.msi`
-   - **Standalone Setup EXE:** `SleekSSH_0.1.0_x64-setup.exe`
-2. Run the installer and launch **SleekSSH** from your desktop or start menu.
+Download installers from the [v0.2.0 release](https://github.com/thechandanbhagat/sleek-ssh/releases/tag/v0.2.0).
