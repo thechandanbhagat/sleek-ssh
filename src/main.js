@@ -2119,7 +2119,7 @@ function duplicateActiveSession() {
   const activeSession = activeTabId ? activeSessions[activeTabId] : null;
 
   if (activeSession?.kind === "local" && !activeSession.isClosed) {
-    openLocalTerminal(activeSession.shell);
+    openLocalTerminal(activeSession.shell, activeSession.workingDirectory, activeSession.locationName);
     return;
   }
 
@@ -2186,6 +2186,19 @@ function initSessionShortcuts() {
 
 // --- WORKSPACE & TAB MANAGEMENT ---
 function initWorkspace() {
+  if (window.SleekSshLocalTerminals) {
+    window.SleekSshLocalTerminals.initLocalTerminalPanel({
+      root: document.getElementById("local-locations"),
+      storage: localStorage,
+      invoke,
+      openTerminal: (location) => openLocalTerminal("powershell", location.path, location.name)
+    });
+  } else {
+    const locationError = document.getElementById("local-location-error");
+    locationError.hidden = false;
+    locationError.textContent = "Saved locations could not load. Rebuild SleekSSH with npm run tauri.";
+  }
+
   btnNewTabPlus.addEventListener("click", () => {
     showQuickConnectModal();
   });
@@ -2698,7 +2711,7 @@ function updateSessionToolbar(session) {
   state.dataset.state = status;
   state.textContent = statusLabels[status];
   const directory = toolbar.querySelector(".session-directory");
-  directory.textContent = session.kind === "ssh" ? session.terminalPath || session.currentPath || "Resolving directory…" : "Local machine";
+  directory.textContent = session.kind === "ssh" ? session.terminalPath || session.currentPath || "Resolving directory…" : session.workingDirectory || "Local machine";
   directory.title = directory.textContent;
   const selectedText = session.term.getSelection?.() || "";
   const copyButton = toolbar.querySelector(".session-copy-selection");
@@ -2727,7 +2740,7 @@ function updateSessionToolbar(session) {
   session.terminalInteractions?.refresh();
 }
 
-async function openLocalTerminal(shell) {
+async function openLocalTerminal(shell, workingDirectory = null, locationName = null) {
   const shellLabel = LOCAL_TERMINAL_SHELLS[shell];
   if (!shellLabel) {
     showNotification("That local shell is not supported.");
@@ -2735,14 +2748,15 @@ async function openLocalTerminal(shell) {
   }
 
   welcomeScreen.classList.add("hidden");
-  const sessionId = `local_${shell}_${Date.now()}`;
-  const tabEl = createWorkspaceTab(sessionId, "local", shellLabel);
+  const sessionName = locationName ? `${shellLabel} · ${locationName}` : shellLabel;
+  const sessionId = `local_${shell}_${crypto.randomUUID()}`;
+  const tabEl = createWorkspaceTab(sessionId, "local", sessionName);
 
   const sessionContainer = document.createElement("div");
   sessionContainer.className = "session-container local-terminal-session has-session-toolbar active";
   sessionContainer.dataset.id = sessionId;
   sessionContainer.innerHTML = `
-    ${createSessionToolbarMarkup("local", { name: shellLabel })}
+    ${createSessionToolbarMarkup("local", { name: sessionName })}
     <div class="terminal-viewport">
       ${createTerminalSearchMarkup(sessionId)}
     </div>
@@ -2752,8 +2766,10 @@ async function openLocalTerminal(shell) {
   const session = {
     id: sessionId,
     kind: "local",
-    name: shellLabel,
+    name: sessionName,
     shell,
+    workingDirectory,
+    locationName,
     container: sessionContainer,
     isClosed: false,
     isReady: false,
@@ -2779,6 +2795,7 @@ async function openLocalTerminal(shell) {
     await invoke("start_local_terminal", {
       sessionId,
       shell,
+      workingDirectory,
       cols: term.cols || LOCAL_TERMINAL_DEFAULT_COLUMNS,
       rows: term.rows || LOCAL_TERMINAL_DEFAULT_ROWS
     });

@@ -27,6 +27,7 @@ The automation view uses a sample conversation and command approval.
 ## Your workspace
 
 - **SSH and local terminals:** Keep remote sessions, PowerShell, and Command Prompt in separate tabs. Reconnect a disconnected SSH session from its terminal toolbar.
+- **Saved PowerShell locations:** In **Terminal → Saved locations → Add location**, choose or enter a folder and save it with an optional name. Click the saved location to open PowerShell in that folder. Locations are remembered between app launches and can be edited or removed.
 - **Connections and layout:** Organize saved connections in nested folders. Folder collapse state, sidebar width, and SFTP pane width are remembered.
 - **Terminal controls:** Copy with **Ctrl+Shift+C**, paste with **Ctrl+Shift+V**, and search with **Ctrl+F**. A context menu also provides copy, paste, and selection controls.
 - **SFTP:** Browse remote directories, upload and download files through native file dialogs, create folders, and delete remote files or directories.
