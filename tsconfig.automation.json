@@ -10,5 +10,5 @@
     "rootDir": "src",
     "outDir": "src/generated"
   },
-  "include": ["src/automation.ts", "src/local-terminal-panel.ts"]
+  "include": ["src/automation.ts", "src/local-terminal-panel.ts", "src/command-palette.ts"]
 }

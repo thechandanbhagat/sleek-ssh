@@ -1,59 +1,47 @@
-.sudo-settings,
-.profile-save-error,
-#profile-modal .modal-card {
-  --sudo-settings-border-width: 1px;
-  --sudo-settings-radius: 8px;
-  --sudo-settings-margin: 16px;
-  --sudo-settings-padding: 12px;
-  --sudo-settings-label-font-size: 13px;
-  --sudo-settings-label-font-weight: 600;
-  --sudo-settings-legend-padding: 6px;
-  --sudo-settings-checkbox-gap: 8px;
-  --sudo-settings-checkbox-size: 16px;
-  --sudo-settings-field-margin: 10px;
-  --sudo-modal-viewport-space: 48px;
-}
-
 .sudo-settings {
-  border: var(--sudo-settings-border-width) solid var(--border-color);
-  border-radius: var(--sudo-settings-radius);
-  margin: var(--sudo-settings-margin) 0;
-  padding: var(--sudo-settings-padding);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 4px 0;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--ink-1);
 }
 
 .sudo-settings legend {
-  color: var(--text-primary);
-  font-size: var(--sudo-settings-label-font-size);
-  font-weight: var(--sudo-settings-label-font-weight);
-  padding: 0 var(--sudo-settings-legend-padding);
+  padding: 0 6px;
+  color: var(--text-1);
+  font-size: 12.5px;
+  font-weight: 600;
 }
 
 .sudo-checkbox-label {
   display: flex;
   align-items: center;
-  gap: var(--sudo-settings-checkbox-gap);
-  color: var(--text-primary);
-  font-size: var(--sudo-settings-label-font-size);
+  gap: 8px;
+  color: var(--text-1);
+  font-size: 13px;
+  cursor: pointer;
 }
 
 .sudo-checkbox-label input {
-  width: var(--sudo-settings-checkbox-size);
-  height: var(--sudo-settings-checkbox-size);
+  width: 15px;
+  height: 15px;
   margin: 0;
-  accent-color: var(--accent-color);
+  accent-color: var(--accent);
 }
 
-.sudo-settings .form-group {
-  margin-bottom: var(--sudo-settings-field-margin);
+.sudo-settings .helper-text {
+  margin: 0;
 }
 
 .profile-save-error {
-  color: var(--danger-color);
-  font-size: var(--sudo-settings-label-font-size);
-  margin: 0 0 var(--sudo-settings-padding);
+  color: var(--danger);
+  font-size: 12.5px;
+  line-height: 1.5;
 }
 
 #profile-modal .modal-card {
-  max-height: calc(100vh - var(--sudo-modal-viewport-space));
-  overflow-y: auto;
+  max-height: calc(100vh - 48px);
 }

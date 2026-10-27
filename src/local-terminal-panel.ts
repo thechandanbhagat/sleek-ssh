@@ -173,8 +173,8 @@ export function initLocalTerminalPanel(options: LocalTerminalPanelOptions): void
 
 declare global {
   interface Window {
-    SleekSshLocalTerminals?: { initLocalTerminalPanel: typeof initLocalTerminalPanel };
+    SleekSshLocalTerminals?: { initLocalTerminalPanel: typeof initLocalTerminalPanel; loadLocations: typeof loadLocalTerminalLocations };
   }
 }
 
-if (typeof window !== "undefined") window.SleekSshLocalTerminals = { initLocalTerminalPanel };
+if (typeof window !== "undefined") window.SleekSshLocalTerminals = { initLocalTerminalPanel, loadLocations: loadLocalTerminalLocations };

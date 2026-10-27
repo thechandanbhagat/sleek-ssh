@@ -16,6 +16,9 @@ let pendingVpnCertificateProfile = null;
 let quickConnectModalTrigger = null;
 let notificationElement = null;
 let notificationTimeoutId = null;
+let commandPalette = null;
+let agentUiState = { open: false, running: false, review: false, targetSessionId: null };
+let vpnStatusSnapshot = { state: "unknown", server: null };
 const NAMESPACE_SEPARATOR = "/";
 const NOTIFICATION_DURATION_MS = 3500;
 const SFTP_EXPLORER_STATE_STORAGE_KEY = "sleekssh_sftp_explorer_state";
@@ -26,24 +29,50 @@ const TERMINAL_DIRECTORY_SYNC_DELAY_MS = 50;
 const TERMINAL_RECONNECT_RESET_SEQUENCE = "\x1b[?1049l\x1b[!p";
 const TERMINAL_SCROLLBAR_WIDTH = 6;
 const TERMINAL_SEARCH_REFRESH_DELAY_MS = 100;
-const TERMINAL_SEARCH_MATCH_COLOR = "#4c3d0a";
-const TERMINAL_SEARCH_ACTIVE_MATCH_COLOR = "#0f766e";
-const TERMINAL_SEARCH_MATCH_RULER_COLOR = "#facc15";
-const TERMINAL_SEARCH_ACTIVE_MATCH_RULER_COLOR = "#2dd4bf";
+const TERMINAL_SEARCH_MATCH_COLOR = "#3d3220";
+const TERMINAL_SEARCH_ACTIVE_MATCH_COLOR = "#1f3a63";
+const TERMINAL_SEARCH_MATCH_RULER_COLOR = "#f7b44e";
+const TERMINAL_SEARCH_ACTIVE_MATCH_RULER_COLOR = "#65a3ff";
 const LOCAL_TERMINAL_DEFAULT_COLUMNS = 80;
 const LOCAL_TERMINAL_DEFAULT_ROWS = 24;
 const LOCAL_TERMINAL_SHELLS = Object.freeze({
   powershell: "PowerShell",
   cmd: "Command Prompt"
 });
+const UI_ICONS = Object.freeze({
+  server: '<rect x="3" y="4" width="18" height="7" rx="2"></rect><rect x="3" y="13" width="18" height="7" rx="2"></rect><path d="M7 7.5h.01M7 16.5h.01"></path>',
+  terminal: '<rect x="3" y="4" width="18" height="16" rx="2.5"></rect><path d="M7 9.5l3 2.5-3 2.5M12.5 15H17"></path>',
+  agent: '<path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9-1.9 5.1-1.9-5.1L5 10.5l5.1-1.9z"></path>',
+  agentFull: '<path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9-1.9 5.1-1.9-5.1L5 10.5l5.1-1.9z"></path><path d="M18.5 16.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"></path>',
+  close: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"></path>',
+  folder: '<path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"></path>',
+  file: '<path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z"></path><path d="M14 3.5V8h4.5"></path>',
+  edit: '<path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17v3z"></path><path d="M14.5 7.5l2 2"></path>',
+  trash: '<path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l.8 12.2a1.5 1.5 0 0 0 1.5 1.3h6.4a1.5 1.5 0 0 0 1.5-1.3L17.5 7"></path>',
+  download: '<path d="M12 4.5V15M7.5 10.5L12 15l4.5-4.5"></path><path d="M4.5 15v3a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-3"></path>',
+  upload: '<path d="M12 15V4.5M7.5 9L12 4.5 16.5 9"></path><path d="M4.5 15v3a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-3"></path>',
+  arrowUp: '<path d="M12 19V5M6 11l6-6 6 6"></path>',
+  refresh: '<path d="M20 12a8 8 0 1 1-2.34-5.66"></path><path d="M20 4.5V9h-4.5"></path>',
+  folderPlus: '<path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"></path><path d="M12 10.5v5M9.5 13h5"></path>',
+  link: '<path d="M10 13.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1"></path><path d="M14 10.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1"></path>',
+  chevronDown: '<path d="M6 9l6 6 6-6"></path>',
+  shield: '<path d="M12 3l7 3v5.5c0 4.2-2.9 7.7-7 9.5-4.1-1.8-7-5.3-7-9.5V6z"></path>',
+  key: '<circle cx="8" cy="15" r="4"></circle><path d="M10.9 12.1L19 4M15.5 7.5l2.5 2.5M13.5 9.5l1.5 1.5"></path>',
+  search: '<circle cx="11" cy="11" r="6.5"></circle><path d="M20 20l-4.2-4.2"></path>'
+});
+
+function uiIcon(name, className = "icon") {
+  return `<svg class="${className}" viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS[name]}</svg>`;
+}
+
 const TAB_KIND_CONFIG = Object.freeze({
   ssh: {
     label: "SSH",
-    icon: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="2"></rect><rect x="3" y="14" width="18" height="6" rx="2"></rect><circle cx="7" cy="7" r="1"></circle><circle cx="7" cy="17" r="1"></circle></svg>`
+    icon: `<svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.server}</svg>`
   },
   local: {
     label: "Local",
-    icon: `<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>`
+    icon: `<svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.terminal}</svg>`
   },
   settings: {
     label: "Settings",
@@ -51,7 +80,7 @@ const TAB_KIND_CONFIG = Object.freeze({
   },
   ports: {
     label: "Ports",
-    icon: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"></circle><line x1="22" y1="12" x2="18" y2="12"></line><line x1="6" y1="12" x2="2" y2="12"></line><line x1="12" y1="6" x2="12" y2="2"></line><line x1="12" y1="22" x2="12" y2="18"></line></svg>`
+    icon: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="1.8"></circle><path d="M8.1 8.1a5.5 5.5 0 0 0 0 7.8M15.9 8.1a5.5 5.5 0 0 1 0 7.8M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 5.3a9.5 9.5 0 0 1 0 13.4"></path></svg>`
   }
 });
 
@@ -165,16 +194,17 @@ function createWorkspaceTab(sessionId, kind, title) {
   tabElement.className = "terminal-tab active";
   tabElement.dataset.id = sessionId;
   tabElement.dataset.kind = kind;
+  tabElement.dataset.status = kind === "ssh" || kind === "local" ? "connecting" : "none";
   tabElement.setAttribute("role", "presentation");
   tabElement.innerHTML = `
     <button class="tab-activation" type="button" role="tab" aria-selected="false">
       <span class="tab-identity">
-        <span class="tab-kind-icon">${kindConfig.icon}</span>
+        <span class="tab-kind-icon">${kindConfig.icon}<span class="tab-status-dot" aria-hidden="true"></span></span>
         <span class="tab-title">${escapeHtml(title)}</span>
-        <span class="tab-kind-badge">${kindConfig.label}</span>
+        <span class="tab-agent-indicator" title="The agent is working on this server" aria-hidden="true"><svg viewBox="0 0 24 24">${UI_ICONS.agent}</svg></span>
       </span>
     </button>
-    <button class="btn-tab-close" type="button" aria-label="Close ${escapeHtml(title)}">&times;</button>
+    <button class="btn-tab-close" type="button" aria-label="Close ${escapeHtml(title)}"><svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.close}</svg></button>
   `;
 
   const activationButton = tabElement.querySelector(".tab-activation");
@@ -689,12 +719,14 @@ window.addEventListener("DOMContentLoaded", () => {
   initSessionShortcuts();
   initPortKiller();
   initAutomationPanel();
+  initWorkspaceChrome();
+  initCommandPaletteIntegration();
 });
 
 function initAutomationPanel() {
   if (!window.SleekSshAutomation) {
     document.getElementById("btn-automation-toggle")?.addEventListener("click", () => {
-      showNotification("SSH automation could not load. Rebuild SleekSSH with npm run tauri.");
+      showNotification("The agent panel could not load. Rebuild SleekSSH with npm run tauri.");
     });
     return;
   }
@@ -713,8 +745,13 @@ function initAutomationPanel() {
       };
     },
     onLayoutChange: () => {
+      handleAgentPanelLayoutChange();
       const session = activeSessions[activeTabId];
       if (session?.term) requestAnimationFrame(() => fitTerminal(session));
+    },
+    onStateChange: (state) => {
+      agentUiState = state;
+      refreshWorkspaceChrome();
     }
   });
 }
@@ -801,13 +838,20 @@ function updatePanelSeparator(handle, width, minimum, maximum) {
   handle.setAttribute("aria-valuetext", `${Math.round(width)} pixels`);
 }
 
+function getMeasuredLayoutWidth(element) {
+  return element && typeof element.getBoundingClientRect === "function" ? element.getBoundingClientRect().width : 0;
+}
+
 function refreshPanelLayout() {
   const app = document.querySelector(".app-container");
   const sidebar = document.querySelector(".sidebar");
   if (!app || !sidebar || typeof app.getBoundingClientRect !== "function") return;
-  const totalWidth = app.getBoundingClientRect().width;
+  const agentPanel = document.getElementById("automation-panel");
+  const agentWidth = agentPanel && agentPanel.hidden === false ? getMeasuredLayoutWidth(agentPanel) : 0;
+  const agentOpen = agentWidth > 0;
+  const totalWidth = Math.max(0, app.getBoundingClientRect().width - getMeasuredLayoutWidth(document.querySelector(".activity-rail")) - agentWidth);
   const activeSession = activeSessions[activeTabId];
-  const sftpOpen = activeSession?.kind === "ssh" && activeSession.sftpPanelOpen !== false;
+  const sftpOpen = !agentOpen && activeSession?.kind === "ssh" && activeSession.sftpPanelOpen !== false;
   const widths = getPanelLayoutWidths(totalWidth, panelLayoutPreferences.sidebarWidth, panelLayoutPreferences.sftpWidth, panelLayoutPreferences.sidebarOpen, sftpOpen);
   app.style.setProperty("--sidebar-width", `${widths.sidebarWidth}px`);
   app.classList.toggle("sidebar-collapsed", widths.sidebarWidth === 0);
@@ -821,17 +865,11 @@ function refreshPanelLayout() {
   updatePanelSeparator(document.getElementById("sidebar-resize-handle"), widths.sidebarWidth, PANEL_LAYOUT_LIMITS.sidebarMinimum, Math.min(PANEL_LAYOUT_LIMITS.sidebarMaximum, totalWidth - PANEL_LAYOUT_LIMITS.terminalMinimum - (sftpOpen && !widths.sftpAutoCollapsed ? PANEL_LAYOUT_LIMITS.sftpMinimum : 0)));
   Object.values(activeSessions).forEach((session) => {
     if (!session.container || session.kind !== "ssh") return;
-    const sessionWidths = getPanelLayoutWidths(totalWidth - widths.sidebarWidth, 0, panelLayoutPreferences.sftpWidth, false, session.sftpPanelOpen !== false);
+    const sessionWidths = getPanelLayoutWidths(totalWidth - widths.sidebarWidth, 0, panelLayoutPreferences.sftpWidth, false, !agentOpen && session.sftpPanelOpen !== false);
     session.container.style.setProperty("--sftp-panel-width", `${sessionWidths.sftpWidth}px`);
-    session.container.classList.toggle("sftp-auto-collapsed", sessionWidths.sftpAutoCollapsed);
+    session.container.classList.toggle("sftp-auto-collapsed", !agentOpen && sessionWidths.sftpAutoCollapsed);
     const panel = session.container.querySelector(".sftp-panel");
     if (panel) panel.inert = sessionWidths.sftpWidth === 0;
-    const toggle = session.container.querySelector(".sftp-toggle-btn");
-    if (toggle) {
-      toggle.setAttribute("aria-expanded", String(sessionWidths.sftpWidth > 0));
-      toggle.title = sessionWidths.sftpWidth > 0 ? "Hide files" : sessionWidths.sftpAutoCollapsed ? "Show files when the window is wider" : "Show files";
-      toggle.setAttribute("aria-label", toggle.title);
-    }
     updatePanelSeparator(session.container.querySelector(".sftp-resize-handle"), sessionWidths.sftpWidth, PANEL_LAYOUT_LIMITS.sftpMinimum, Math.min(PANEL_LAYOUT_LIMITS.sftpMaximum, totalWidth - widths.sidebarWidth - PANEL_LAYOUT_LIMITS.terminalMinimum));
     if (session.term && typeof updateSessionToolbar === "function") updateSessionToolbar(session);
   });
@@ -925,11 +963,6 @@ function initWindowControls() {
     appWindow.close();
   });
 
-  // Settings Tab trigger
-  document.getElementById("titlebar-settings").addEventListener("click", () => {
-    openSettingsTab();
-  });
-
   // Re-focus the active terminal when the window gains focus so that
   // external apps sending keystrokes (e.g. password managers, macros)
   // reach the xterm.js terminal rather than being swallowed by WebView2.
@@ -961,13 +994,11 @@ function applyVpnTabVisibility() {
       vpnTab.classList.add("hidden");
       // If the current active tab was VPN, switch to connections
       if (vpnTab.classList.contains("active")) {
-        const connTab = document.querySelector('.nav-tab[data-tab="connections"]');
-        if (connTab) {
-          connTab.click();
-        }
+        activateSidebarView("connections", { keepOpen: true });
       }
     }
   }
+  refreshWorkspaceChrome();
 }
 
 function initSettings() {
@@ -1095,16 +1126,33 @@ async function setAppZoom(factor) {
 }
 
 // --- NAVIGATION & TABS (Sidebar) ---
+function isSidebarVisible() {
+  const app = document.querySelector(".app-container");
+  return Boolean(app) && !app.classList.contains("sidebar-collapsed");
+}
+
+// Selecting the active view again hides the sidebar, like an editor activity bar.
+function activateSidebarView(view, { keepOpen = false } = {}) {
+  const tab = Array.from(sidebarTabs).find(candidate => candidate.dataset.tab === view);
+  if (!tab || tab.classList.contains("hidden")) return;
+  const alreadyActive = tab.classList.contains("active");
+  if (alreadyActive && isSidebarVisible() && !keepOpen) {
+    toggleSidebarPanel();
+    return;
+  }
+  sidebarTabs.forEach(candidate => {
+    const isActive = candidate === tab;
+    candidate.classList.toggle("active", isActive);
+    candidate.setAttribute("aria-pressed", String(isActive));
+  });
+  tabPanes.forEach(pane => pane.classList.toggle("active", pane.id === `pane-${view}`));
+  if (!isSidebarVisible() && !panelLayoutPreferences.sidebarOpen) toggleSidebarPanel();
+  else refreshPanelLayout();
+}
+
 function initNavigation() {
   sidebarTabs.forEach(tab => {
-    tab.addEventListener("click", () => {
-      sidebarTabs.forEach(t => t.classList.remove("active"));
-      tabPanes.forEach(p => p.classList.remove("active"));
-
-      tab.classList.add("active");
-      const targetPane = document.getElementById(`pane-${tab.dataset.tab}`);
-      if (targetPane) targetPane.classList.add("active");
-    });
+    tab.addEventListener("click", () => activateSidebarView(tab.dataset.tab));
   });
 
   // Radio button toggles for auth mode
@@ -1167,30 +1215,74 @@ async function initProfileList() {
   try {
     savedProfiles = await invoke("load_connections");
     renderProfiles();
+    if (typeof updateHostIndicators === "function") updateHostIndicators();
   } catch (e) {
     console.error("Failed to load profiles:", e);
-    profilesList.innerHTML = `<div class="empty-state">Error loading profiles: ${e}</div>`;
+    profilesList.innerHTML = `<div class="empty-state">Could not load saved hosts: ${escapeHtml(String(e))}</div>`;
   }
 }
 
 let savedSessionFolderSequence = 0;
+let hostFilterQuery = "";
+const HOST_ROW_ICONS = Object.freeze({
+  edit: '<path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17v3z"></path><path d="M14.5 7.5l2 2"></path>',
+  trash: '<path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l.8 12.2a1.5 1.5 0 0 0 1.5 1.3h6.4a1.5 1.5 0 0 0 1.5-1.3L17.5 7"></path>'
+});
+
+function profileMatchesFilter(profile, query) {
+  if (!query) return true;
+  const haystack = [profile.name, profile.host, profile.username, profile.namespace, `${profile.username}@${profile.host}`]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return query.split(/\s+/).filter(Boolean).every(term => haystack.includes(term));
+}
 
 function renderProfiles() {
   savedSessionFolderSequence = 0;
   if (savedProfiles.length === 0) {
-    profilesList.innerHTML = `<div class="empty-state">No saved profiles. Click "+" to add.</div>`;
+    profilesList.innerHTML = `<div class="empty-state">No saved hosts yet. Use + to add one.</div>`;
+    return;
+  }
+
+  const query = hostFilterQuery.trim().toLowerCase();
+  const visibleProfiles = savedProfiles.filter(profile => profileMatchesFilter(profile, query));
+  if (visibleProfiles.length === 0) {
+    profilesList.innerHTML = `<div class="empty-state">No hosts match “${escapeHtml(hostFilterQuery.trim())}”.</div>`;
     return;
   }
 
   profilesList.innerHTML = "";
-  const namespaceTree = createNamespaceTree(savedProfiles);
-  appendNamespaceFolders(namespaceTree, profilesList);
+  const namespaceTree = createNamespaceTree(visibleProfiles);
+  appendNamespaceFolders(namespaceTree, profilesList, [], Boolean(query));
 
   namespaceTree.profiles.forEach(profile => {
     profilesList.appendChild(createProfileItemElement(profile));
   });
 
   hookProfileActions();
+}
+
+function initHostFilter() {
+  const filterInput = document.getElementById("host-filter");
+  if (!filterInput) return;
+  filterInput.addEventListener("input", () => {
+    hostFilterQuery = filterInput.value;
+    renderProfiles();
+    if (typeof updateHostIndicators === "function") updateHostIndicators();
+  });
+  filterInput.addEventListener("keydown", event => {
+    if (event.key === "Escape" && filterInput.value) {
+      event.preventDefault();
+      filterInput.value = "";
+      hostFilterQuery = "";
+      renderProfiles();
+      if (typeof updateHostIndicators === "function") updateHostIndicators();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      profilesList.querySelector(".profile-connect")?.click();
+    }
+  });
 }
 
 function createNamespaceTree(profiles) {
@@ -1234,39 +1326,35 @@ function applySavedSessionFolderState(folderEl, expanded) {
   folderEl.querySelector(".folder-state").textContent = expanded ? "Expanded" : "Collapsed";
 }
 
-function appendNamespaceFolders(namespaceNode, parentElement, namespacePath = []) {
+function appendNamespaceFolders(namespaceNode, parentElement, namespacePath = [], forceExpanded = false) {
   [...namespaceNode.children.entries()]
     .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
     .forEach(([namespaceName, childNode]) => {
       const childPath = [...namespacePath, namespaceName];
       const namespaceKey = childPath.join(NAMESPACE_SEPARATOR);
       const contentId = `saved-session-folder-${savedSessionFolderSequence += 1}`;
+      const profileCount = getNamespaceProfileCount(childNode);
       const folderEl = document.createElement("div");
       folderEl.className = "profile-folder";
 
       folderEl.innerHTML = `
-        <button class="folder-header" type="button" aria-expanded="true" aria-controls="${contentId}">
-          <svg class="folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-          </svg>
+        <button class="folder-header" type="button" style="--depth: ${namespacePath.length}" aria-expanded="true" aria-controls="${contentId}" aria-label="${escapeHtml(namespaceName)}, ${profileCount} ${profileCount === 1 ? "host" : "hosts"}">
+          <svg class="chevron-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>
           <span class="folder-heading">
             <span class="folder-name">${escapeHtml(namespaceName)}</span>
             <span class="folder-state" aria-hidden="true"></span>
           </span>
-          <span class="folder-count">(${getNamespaceProfileCount(childNode)})</span>
-          <svg class="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-            <polyline points="6 9 12 15 18 9"></polyline>
-          </svg>
+          <span class="folder-count" aria-hidden="true">${profileCount}</span>
         </button>
-        <div class="folder-content" id="${contentId}"></div>
+        <div class="folder-content" id="${contentId}" role="group" style="--depth: ${childPath.length}"></div>
       `;
-      applySavedSessionFolderState(folderEl, !readSavedSessionFolderCollapsed(namespaceKey));
+      applySavedSessionFolderState(folderEl, forceExpanded || !readSavedSessionFolderCollapsed(namespaceKey));
 
       const contentElement = folderEl.querySelector(".folder-content");
       childNode.profiles.forEach(profile => {
         contentElement.appendChild(createProfileItemElement(profile));
       });
-      appendNamespaceFolders(childNode, contentElement, childPath);
+      appendNamespaceFolders(childNode, contentElement, childPath, forceExpanded);
 
       folderEl.querySelector(".folder-header").addEventListener("click", () => {
         const collapsed = !folderEl.classList.contains("collapsed");
@@ -1281,33 +1369,29 @@ function appendNamespaceFolders(namespaceNode, parentElement, namespacePath = []
 function createProfileItemElement(p) {
   const item = document.createElement("div");
   item.className = "profile-item";
+  item.setAttribute("data-profile-id", p.id);
+  const address = `${p.username}@${p.host}:${p.port}`;
   item.innerHTML = `
-    <div class="profile-item-header">
+    <button class="profile-connect" type="button" title="${escapeHtml(address)} (${p.use_password ? "password" : "key"})">
+      <span class="profile-status-dot" aria-hidden="true"></span>
       <span class="profile-name">${escapeHtml(p.name)}</span>
-      <div class="profile-actions">
-        <button class="btn-action edit-action" title="Edit Profile" data-id="${p.id}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
-            <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
-          </svg>
-        </button>
-        <button class="btn-action delete-action" title="Delete Profile" data-id="${p.id}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="3 6 5 6 21 6"></polyline>
-            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-          </svg>
-        </button>
-      </div>
-    </div>
-    <div class="profile-details">
-      <span>${escapeHtml(p.username)}@${escapeHtml(p.host)}:${p.port}</span>
-      <span>(${p.use_password ? "pwd" : "key"})</span>
+      <span class="sr-only profile-state-label"></span>
+      <span class="profile-host" aria-hidden="true">${escapeHtml(p.host)}</span>
+      <span class="sr-only">, ${escapeHtml(address)}</span>
+    </button>
+    <div class="profile-actions">
+      <button class="btn-action edit-action" type="button" title="Edit host" aria-label="Edit ${escapeHtml(p.name)}" data-id="${escapeHtml(p.id)}">
+        <svg viewBox="0 0 24 24" aria-hidden="true">${HOST_ROW_ICONS.edit}</svg>
+      </button>
+      <button class="btn-action delete-action" type="button" title="Delete host" aria-label="Delete ${escapeHtml(p.name)}" data-id="${escapeHtml(p.id)}">
+        <svg viewBox="0 0 24 24" aria-hidden="true">${HOST_ROW_ICONS.trash}</svg>
+      </button>
     </div>
   `;
 
-  item.addEventListener("click", (e) => {
-    if (e.target.closest(".btn-action")) return;
-    connectProfile(p);
+  item.querySelector(".profile-connect")?.addEventListener("click", (event) => {
+    if (event.ctrlKey || event.metaKey || typeof openOrSwitchToProfile !== "function") connectProfile(p);
+    else openOrSwitchToProfile(p);
   });
 
   return item;
@@ -1323,13 +1407,15 @@ function hookProfileActions() {
 
   document.querySelectorAll(".delete-action").forEach(btn => {
     btn.addEventListener("click", async () => {
-      if (confirm("Are you sure you want to delete this connection profile?")) {
+      const profile = savedProfiles.find(p => p.id === btn.dataset.id);
+      if (confirm(`Delete the saved host "${profile?.name ?? "this host"}"? Open sessions stay connected.`)) {
         savedProfiles = savedProfiles.filter(p => p.id !== btn.dataset.id);
         try {
           await invoke("save_connections", { connections: savedProfiles });
           renderProfiles();
+          if (typeof updateHostIndicators === "function") updateHostIndicators();
         } catch (e) {
-          alert("Failed to delete profile: " + e);
+          alert("Failed to delete host: " + e);
         }
       }
     });
@@ -1348,7 +1434,7 @@ async function initKeyManager() {
 
   btnGenerateKey.addEventListener("click", async () => {
     btnGenerateKey.disabled = true;
-    btnGenerateKey.textContent = "Generating Key...";
+    btnGenerateKey.textContent = "Generating key…";
     try {
       const pubkey = await invoke("generate_new_ssh_key");
       pubkeyText.value = pubkey;
@@ -1362,23 +1448,23 @@ async function initKeyManager() {
       alert("Failed to generate SSH key: " + e);
     } finally {
       btnGenerateKey.disabled = false;
-      btnGenerateKey.textContent = "Generate Ed25519 Key";
+      btnGenerateKey.textContent = "Generate Ed25519 key";
     }
   });
 
   btnCopyPubkey.addEventListener("click", () => {
     pubkeyText.select();
     navigator.clipboard.writeText(pubkeyText.value);
-    btnCopyPubkey.textContent = "Copied!";
+    btnCopyPubkey.textContent = "Copied";
     setTimeout(() => {
-      btnCopyPubkey.textContent = "Copy Key to Clipboard";
+      btnCopyPubkey.textContent = "Copy key to clipboard";
     }, 2000);
   });
 }
 
 function renderSystemKeys(keys) {
   if (!keys || keys.length === 0) {
-    systemKeysList.innerHTML = `<div class="key-item" style="color: var(--text-secondary)">No existing keys found. Generate one below!</div>`;
+    systemKeysList.innerHTML = `<div class="empty-state">No private keys found in ~/.ssh. Generate one below.</div>`;
     return;
   }
 
@@ -1389,8 +1475,8 @@ function renderSystemKeys(keys) {
     // Extract filename from full path
     const filename = k.split(/[\\/]/).pop();
     item.innerHTML = `
-      <span>${escapeHtml(filename)}</span>
-      <span class="small-text" style="color: var(--text-secondary); word-break: keep-all; font-size: 0.65rem;">${escapeHtml(k)}</span>
+      <span class="key-item-name">${escapeHtml(filename)}</span>
+      <span class="key-item-path" title="${escapeHtml(k)}">${escapeHtml(k)}</span>
     `;
     systemKeysList.appendChild(item);
   });
@@ -1479,7 +1565,7 @@ async function loadVpnProfiles() {
 
 function renderVpnProfiles() {
   if (savedVpnProfiles.length === 0) {
-    vpnProfilesList.innerHTML = `<div class="empty-state">No VPN shortcuts saved. Click "+" to add one.</div>`;
+    vpnProfilesList.innerHTML = `<div class="empty-state">No VPN shortcuts saved. Use + to add one.</div>`;
     return;
   }
 
@@ -1496,34 +1582,27 @@ function renderVpnProfiles() {
 
 function createVpnProfileItemElement(profile) {
   const item = document.createElement("div");
-  item.className = "profile-item vpn-profile-item";
+  item.className = "vpn-profile-item";
+  const meta = [profile.server, profile.group || "Default group", profile.password ? "password saved" : null].filter(Boolean).join(" · ");
   item.innerHTML = `
-    <div class="profile-item-header">
-      <span class="profile-name">${escapeHtml(profile.name)}</span>
-      <div class="profile-actions">
-        <button class="btn-action vpn-edit-action" title="Edit VPN Shortcut" data-id="${profile.id}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
-            <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
-          </svg>
-        </button>
-        <button class="btn-action vpn-delete-action" title="Delete VPN Shortcut" data-id="${profile.id}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="3 6 5 6 21 6"></polyline>
-            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-          </svg>
-        </button>
-      </div>
-    </div>
-    <div class="profile-details vpn-profile-details">
-      <span>${escapeHtml(profile.server)}</span>
-      <span>${profile.group ? escapeHtml(profile.group) : "Default group"}</span>
-      <span>${profile.username ? escapeHtml(profile.username) : "No saved username"} / ${profile.password ? "Password saved" : "No saved password"}</span>
+    <button class="vpn-profile-connect" type="button" title="Connect to ${escapeHtml(profile.name)}">
+      ${uiIcon("shield")}
+      <span class="vpn-profile-text">
+        <span class="profile-name">${escapeHtml(profile.name)}</span>
+        <span class="vpn-profile-meta">${escapeHtml(meta)}</span>
+      </span>
+    </button>
+    <div class="profile-actions">
+      <button class="btn-action vpn-edit-action" type="button" title="Edit VPN shortcut" aria-label="Edit ${escapeHtml(profile.name)}" data-id="${escapeHtml(profile.id)}">
+        <svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.edit}</svg>
+      </button>
+      <button class="btn-action vpn-delete-action" type="button" title="Delete VPN shortcut" aria-label="Delete ${escapeHtml(profile.name)}" data-id="${escapeHtml(profile.id)}">
+        <svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.trash}</svg>
+      </button>
     </div>
   `;
 
-  item.addEventListener("click", (e) => {
-    if (e.target.closest(".btn-action")) return;
+  item.querySelector(".vpn-profile-connect").addEventListener("click", () => {
     switchVpnProfile(profile);
   });
 
@@ -1557,7 +1636,7 @@ function showVpnProfileModal(profile = null) {
   vpnProfileForm.reset();
 
   if (profile) {
-    vpnModalTitle.textContent = "Edit VPN Shortcut";
+    vpnModalTitle.textContent = "Edit VPN shortcut";
     document.getElementById("vpn-id").value = profile.id;
     document.getElementById("vpn-name").value = profile.name;
     document.getElementById("vpn-server").value = profile.server;
@@ -1565,7 +1644,7 @@ function showVpnProfileModal(profile = null) {
     document.getElementById("vpn-username").value = profile.username || "";
     document.getElementById("vpn-password").value = profile.password || "";
   } else {
-    vpnModalTitle.textContent = "New VPN Shortcut";
+    vpnModalTitle.textContent = "New VPN shortcut";
     document.getElementById("vpn-id").value = "";
   }
 
@@ -1657,7 +1736,7 @@ async function runVpnSwitch(profile, allowInvalidCertificate) {
     }
 
     setVpnStatus(result.success
-      ? "Connected to " + profile.name + ". Use Disconnect Current VPN to end the tunnel."
+      ? "Connected to " + profile.name + ". Use Disconnect current VPN to end the tunnel."
       : (result.output || "VPN switch did not report success."));
     await refreshVpnStatus(false);
     if (!result.success) {
@@ -1697,7 +1776,7 @@ function resolveVpnCredentials(profile) {
   return new Promise(resolve => {
     pendingVpnCredentialResolver = resolve;
     pendingVpnCredentialProfile = profile;
-    vpnCredentialTitle.textContent = "VPN Credentials";
+    vpnCredentialTitle.textContent = "VPN credentials";
     vpnRuntimeUsername.value = profile.username || "";
     vpnRuntimePassword.value = "";
     vpnCredentialModal.classList.remove("hidden");
@@ -1845,6 +1924,8 @@ function normalizeVpnStatusValue(value) {
 
 function setVpnConnectionState({ state, server, clientAddress }) {
   vpnConnectionActive = state === "connected";
+  vpnStatusSnapshot = { state, server };
+  refreshWorkspaceChrome();
   vpnConnectionState.className = "vpn-connection-state is-" + state;
 
   if (state === "connected") {
@@ -2033,7 +2114,7 @@ function initModal() {
   });
 }
 
-function showProfileModal(profile = null) {
+function showProfileModal(profile = null, prefill = null) {
   if (profileSavePending) return;
   if (profileModal.classList.contains("hidden") && document.activeElement instanceof HTMLElement) {
     profileModalTrigger = document.activeElement;
@@ -2047,7 +2128,7 @@ function showProfileModal(profile = null) {
   loadDefaultKeyForInput(profKeypathInput);
 
   if (profile) {
-    modalTitle.textContent = "Edit Connection Profile";
+    modalTitle.textContent = "Edit host";
     document.getElementById("prof-id").value = profile.id;
     document.getElementById("prof-name").value = profile.name;
     document.getElementById("prof-namespace").value = profile.namespace || "";
@@ -2068,17 +2149,26 @@ function showProfileModal(profile = null) {
       document.getElementById("prof-passphrase").value = profile.passphrase || "";
     }
   } else {
-    modalTitle.textContent = "New Connection Profile";
+    modalTitle.textContent = "New host";
     document.getElementById("prof-id").value = "";
     document.getElementById("prof-namespace").value = "";
     document.querySelector('input[name="prof-auth-mode"][value="key"]').checked = true;
     profAuthKeyFields.classList.remove("hidden");
     profAuthPasswordFields.classList.add("hidden");
+    if (prefill) {
+      document.getElementById("prof-name").value = prefill.name || prefill.host || "";
+      document.getElementById("prof-host").value = prefill.host || "";
+      document.getElementById("prof-port").value = prefill.port || appSettings.defaultPort || 22;
+      document.getElementById("prof-username").value = prefill.username || "";
+    }
   }
 
   updateProfileSudoFields();
   profileModal.classList.remove("hidden");
-  window.setTimeout(() => document.getElementById("prof-name").focus(), 0);
+  window.setTimeout(() => {
+    const focusTarget = prefill && !prefill.username ? document.getElementById("prof-username") : document.getElementById("prof-name");
+    focusTarget.focus();
+  }, 0);
 }
 
 function hideProfileModal() {
@@ -2090,19 +2180,30 @@ function hideProfileModal() {
   profileModalTrigger = null;
 }
 
-function showQuickConnectModal() {
+function showQuickConnectModal(prefill = null) {
   if (quickConnectModal.classList.contains("hidden") && document.activeElement instanceof HTMLElement) {
     quickConnectModalTrigger = document.activeElement;
   }
 
   quickConnectForm.reset();
-  document.getElementById("qc-port").value = appSettings.defaultPort;
-  document.querySelector('input[name="qc-auth-mode"][value="key"]').checked = true;
-  qcAuthKeyFields.classList.remove("hidden");
-  qcAuthPasswordFields.classList.add("hidden");
+  document.getElementById("qc-port").value = prefill?.port || appSettings.defaultPort;
+  const usePassword = Boolean(prefill?.usePassword);
+  document.querySelector(`input[name="qc-auth-mode"][value="${usePassword ? "password" : "key"}"]`).checked = true;
+  qcAuthKeyFields.classList.toggle("hidden", usePassword);
+  qcAuthPasswordFields.classList.toggle("hidden", !usePassword);
   loadDefaultKeyForInput(qcKeypathInput);
+  if (prefill) {
+    document.getElementById("qc-host").value = prefill.host || "";
+    document.getElementById("qc-username").value = prefill.username || appSettings.defaultUser || "";
+    if (prefill.host) document.getElementById("qc-name").value = prefill.host;
+  }
   quickConnectModal.classList.remove("hidden");
-  window.setTimeout(() => document.getElementById("qc-host").focus(), 0);
+  window.setTimeout(() => {
+    const target = !prefill?.host ? document.getElementById("qc-host")
+      : !document.getElementById("qc-username").value ? document.getElementById("qc-username")
+        : usePassword ? document.getElementById("qc-password") : quickConnectForm.querySelector('button[type="submit"]');
+    target?.focus();
+  }, 0);
 }
 
 function hideQuickConnectModal() {
@@ -2147,6 +2248,20 @@ function initSessionShortcuts() {
       && !event.shiftKey
       && event.code === "KeyW"
       && !event.repeat;
+    // Ctrl+Shift+P keeps Ctrl+K free for readline and editors inside the terminal.
+    const isCommandPaletteShortcut = (event.ctrlKey || event.metaKey)
+      && event.shiftKey
+      && !event.altKey
+      && event.code === "KeyP"
+      && !event.repeat;
+
+    if (isCommandPaletteShortcut) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (commandPalette?.isOpen()) commandPalette.close();
+      else openCommandPalette("all");
+      return;
+    }
 
     if (isTerminalSearchShortcut) {
       const activeSession = activeTabId ? activeSessions[activeTabId] : null;
@@ -2176,7 +2291,7 @@ function initSessionShortcuts() {
     event.stopPropagation();
 
     if (event.altKey) {
-      showQuickConnectModal();
+      openCommandPalette("connect");
       return;
     }
 
@@ -2200,11 +2315,11 @@ function initWorkspace() {
   }
 
   btnNewTabPlus.addEventListener("click", () => {
-    showQuickConnectModal();
+    openCommandPalette("all");
   });
 
   welcomeBtnNew.addEventListener("click", () => {
-    showQuickConnectModal();
+    openCommandPalette("connect");
   });
 
   welcomeBtnAdd.addEventListener("click", () => {
@@ -2304,6 +2419,7 @@ function switchTab(sessionId) {
     tab.classList.toggle("active", isActive);
     activationButton.setAttribute("aria-selected", String(isActive));
     activationButton.tabIndex = isActive ? 0 : -1;
+    if (isActive && typeof tab.scrollIntoView === "function") tab.scrollIntoView({ block: "nearest", inline: "nearest" });
   });
 
   // Update Container Elements UI
@@ -2316,6 +2432,7 @@ function switchTab(sessionId) {
   });
 
   refreshPanelLayout();
+  refreshWorkspaceChrome();
 
   // Focus terminal
   const activeSession = activeSessions[sessionId];
@@ -2546,40 +2663,42 @@ function createTerminalForSession(session) {
   const term = new Terminal({
     allowProposedApi: true,
     cursorBlink: true,
-    fontFamily: "Fira Code, monospace",
+    fontFamily: "'JetBrains Mono', 'Cascadia Mono', Consolas, monospace",
     fontSize: appSettings.fontSize,
+    lineHeight: 1.2,
     scrollback: 5000,
     wordSeparator: TERMINAL_WORD_SEPARATORS,
     rightClickSelectsWord: false,
     macOptionClickForcesSelection: true,
     overviewRuler: { width: TERMINAL_SCROLLBAR_WIDTH },
     theme: {
-      background: "#000000",
-      foreground: "#f8f8f2",
-      cursor: "#22d3ee",
-      cursorAccent: "#082f49",
-      selectionBackground: "#79cfdf",
-      selectionForeground: "#082f49",
-      selectionInactiveBackground: "#94a3b8",
-      black: "#000000",
-      red: "#ff5555",
-      green: "#50fa7b",
-      yellow: "#f1fa8c",
-      blue: "#bd93f9",
-      magenta: "#ff79c6",
-      cyan: "#8be9fd",
-      white: "#bfbfbf",
-      brightBlack: "#4d4d4d",
-      brightRed: "#ff6e67",
-      brightGreen: "#5af78e",
-      brightYellow: "#f4f99d",
-      brightBlue: "#caa9fa",
-      brightMagenta: "#ff92d0",
-      brightCyan: "#9aedfe",
-      brightWhite: "#e6e6e6",
-      scrollbarSliderBackground: "rgba(148, 163, 184, 0.32)",
-      scrollbarSliderHoverBackground: "rgba(148, 163, 184, 0.52)",
-      scrollbarSliderActiveBackground: "rgba(226, 232, 240, 0.64)"
+      background: "#0c0f15",
+      foreground: "#e7e9ef",
+      cursor: "#65a3ff",
+      cursorAccent: "#0c0f15",
+      selectionBackground: "#2c4a7a",
+      selectionForeground: "#f4f6fa",
+      selectionInactiveBackground: "#2a2f3a",
+      black: "#181c24",
+      red: "#f66c6d",
+      green: "#58d18b",
+      yellow: "#f7b44e",
+      blue: "#65a3ff",
+      magenta: "#ab8ef6",
+      cyan: "#4cc9d6",
+      white: "#b4b9c2",
+      brightBlack: "#6b717d",
+      brightRed: "#ff8a8a",
+      brightGreen: "#7ee2a8",
+      brightYellow: "#ffcb73",
+      brightBlue: "#8bbcff",
+      brightMagenta: "#c4adff",
+      brightCyan: "#7fdde6",
+      brightWhite: "#f4f6fa",
+      overviewRulerBorder: "#0c0f15",
+      scrollbarSliderBackground: "rgba(231, 233, 239, 0.12)",
+      scrollbarSliderHoverBackground: "rgba(231, 233, 239, 0.22)",
+      scrollbarSliderActiveBackground: "rgba(231, 233, 239, 0.32)"
     }
   });
   const fitAddon = new FitAddon.FitAddon();
@@ -2651,33 +2770,52 @@ async function closeTab(sessionId) {
     activeTabId = null;
     welcomeScreen.classList.remove("hidden");
     automationPanel?.refresh();
+    refreshWorkspaceChrome();
   }
 }
 
 const SESSION_TOOLBAR_ICONS = Object.freeze({
-  copy: '<rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"></path>',
-  paste: '<rect x="5" y="5" width="14" height="16" rx="2"></rect><rect x="9" y="3" width="6" height="4" rx="1"></rect>',
-  search: '<circle cx="10" cy="10" r="6"></circle><path d="m15 15 6 6"></path>',
-  files: '<path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>'
+  copy: '<rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"></path>',
+  paste: '<path d="M9 4.5H7a2 2 0 0 0-2 2V19a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V6.5a2 2 0 0 0-2-2h-2"></path><rect x="9" y="3" width="6" height="3.5" rx="1"></rect>',
+  search: '<circle cx="11" cy="11" r="6.5"></circle><path d="M20 20l-4.2-4.2"></path>',
+  files: '<rect x="3" y="4" width="18" height="16" rx="2.5"></rect><path d="M15 4v16"></path>'
 });
 
 function createSessionToolbarMarkup(kind, profile) {
   const identity = kind === "ssh" ? `${profile.username}@${profile.host}:${profile.port}` : profile.name;
-  const action = (className, label, icon) => `<button class="session-action-button ${className}" type="button" title="${label}" aria-label="${label}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">${icon}</svg></button>`;
+  const action = (className, label, icon) => `<button class="session-action-button ${className}" type="button" title="${label}" aria-label="${label}"><svg viewBox="0 0 24 24" aria-hidden="true">${icon}</svg></button>`;
+  const folders = kind === "ssh" && profile.namespace
+    ? profile.namespace.split(NAMESPACE_SEPARATOR).map(segment => segment.trim()).filter(Boolean)
+    : [];
+  const breadcrumb = folders.length ? `<span class="session-breadcrumb" title="${escapeHtml(folders.join(" / "))}">${escapeHtml(folders.join(" / "))} /</span>` : "";
+  const context = kind === "ssh"
+    ? `${breadcrumb}
+        <strong class="session-name">${escapeHtml(profile.name)}</strong>
+        <span class="session-meta">
+          <span class="session-identity" title="${escapeHtml(identity)}">${escapeHtml(identity)}</span>
+          <span class="session-separator" aria-hidden="true">·</span>
+          <span class="session-directory">Resolving directory…</span>
+        </span>`
+    : `<strong class="session-identity" title="${escapeHtml(identity)}">${escapeHtml(identity)}</strong>
+        <span class="session-meta">
+          <span class="session-separator" aria-hidden="true">·</span>
+          <span class="session-directory">Local machine</span>
+        </span>`;
   return `
-    <div class="session-toolbar">
+    <div class="session-toolbar" data-kind="${kind}">
       <div class="session-context">
-        <strong class="session-identity" title="${escapeHtml(identity)}">${escapeHtml(identity)}</strong>
-        <span class="session-directory">${kind === "ssh" ? "Resolving directory…" : "Local machine"}</span>
+        ${context}
       </div>
       <span class="session-state" data-state="connecting" role="status" aria-live="polite">Connecting</span>
       <div class="session-actions" role="group" aria-label="Terminal actions">
+        ${kind === "ssh" ? '<button class="btn btn-secondary btn-small session-sudo-password" type="button" title="Submit saved sudo password (F2 three times)" hidden>Sudo · F2 ×3</button>' : ""}
+        ${kind === "ssh" ? '<button class="btn btn-primary btn-small btn-reconnect" type="button" hidden>Reconnect</button>' : ""}
+        ${action("session-find", "Find in terminal (Ctrl+F)", SESSION_TOOLBAR_ICONS.search)}
         ${action("session-copy-selection", "Copy selection (Ctrl+Shift+C)", SESSION_TOOLBAR_ICONS.copy)}
         ${action("session-paste", "Paste (Ctrl+Shift+V)", SESSION_TOOLBAR_ICONS.paste)}
-        ${action("session-find", "Find in terminal (Ctrl+F)", SESSION_TOOLBAR_ICONS.search)}
+        ${kind === "ssh" ? '<span class="session-divider" aria-hidden="true"></span>' : ""}
         ${kind === "ssh" ? action("session-files-toggle", "Toggle file browser", SESSION_TOOLBAR_ICONS.files) : ""}
-        ${kind === "ssh" ? '<button class="btn btn-secondary session-sudo-password" type="button" title="Submit saved sudo password (F2 three times)" hidden>Sudo · F2 ×3</button>' : ""}
-        ${kind === "ssh" ? '<button class="btn btn-primary btn-reconnect" type="button" hidden>Reconnect</button>' : ""}
+        ${kind === "ssh" ? `<button class="session-agent-toggle" type="button" aria-pressed="false" aria-controls="automation-panel" title="Ask Claude Code or Codex to work on this server"><svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.agentFull}</svg><span>Agent</span></button>` : ""}
       </div>
     </div>
   `;
@@ -2692,6 +2830,7 @@ function initSessionToolbar(session) {
   toolbar.querySelector(".session-paste").addEventListener("click", () => pasteTerminalClipboard(session));
   toolbar.querySelector(".session-find").addEventListener("click", () => openTerminalSearch(session));
   toolbar.querySelector(".btn-reconnect")?.addEventListener("click", () => reconnectSshSession(session));
+  toolbar.querySelector(".session-agent-toggle")?.addEventListener("click", () => toggleAgentPanel());
   toolbar.querySelector(".session-sudo-password")?.addEventListener("click", async () => {
     await sendSudoPassword(session);
     if (activeTabId === session.id && !session.isClosing) session.term.focus();
@@ -2721,10 +2860,13 @@ function updateSessionToolbar(session) {
   session.term.options.disableStdin = status !== "connected" || session.isConnecting || session.isClosing;
   const filesButton = toolbar.querySelector(".session-files-toggle");
   if (session.kind === "ssh" && filesButton) {
-    const filesOpen = session.sftpPanelOpen && !session.container.classList.contains("sftp-auto-collapsed");
+    const filesOpen = session.sftpPanelOpen && !session.container.classList.contains("sftp-auto-collapsed") && !agentUiState.open;
     filesButton.setAttribute("aria-expanded", String(filesOpen));
     filesButton.title = filesOpen ? "Hide file browser" : "Show file browser";
   }
+  const syncNote = session.container.querySelector(".sftp-sync-note");
+  if (syncNote) syncNote.hidden = !session.hasDirectoryReporting;
+  setWorkspaceTabStatus(session.id, status === "reconnecting" ? "connecting" : status);
   const reconnectButton = toolbar.querySelector(".btn-reconnect");
   const sudoButton = toolbar.querySelector(".session-sudo-password");
   if (session.kind === "ssh" && sudoButton) {
@@ -2738,6 +2880,7 @@ function updateSessionToolbar(session) {
     reconnectButton.textContent = status === "reconnecting" ? "Reconnecting…" : "Reconnect";
   }
   session.terminalInteractions?.refresh();
+  refreshWorkspaceChrome();
 }
 
 async function openLocalTerminal(shell, workingDirectory = null, locationName = null) {
@@ -2826,7 +2969,7 @@ async function connectProfile(profile) {
   const sessionId = profile.id + "_" + Date.now();
   const savedSftpState = getSavedSftpExplorerState(profile.id);
 
-  createWorkspaceTab(sessionId, "ssh", "Connecting...");
+  createWorkspaceTab(sessionId, "ssh", profile.name);
 
   // Create session split layout container (Terminal + SFTP Panel)
   const sessionContainer = document.createElement("div");
@@ -2837,44 +2980,43 @@ async function connectProfile(profile) {
     <div class="terminal-viewport">
       <div class="terminal-connection-loading" role="status" aria-live="polite">
         <span class="terminal-connection-spinner" aria-hidden="true"></span>
-        <span>Connecting to ${escapeHtml(profile.name)}...</span>
+        <span>Connecting to ${escapeHtml(profile.name)}…</span>
       </div>
       ${createTerminalSearchMarkup(sessionId)}
     </div>
     <div class="panel-resize-handle sftp-resize-handle" role="separator" tabindex="0" aria-label="Resize file browser" aria-orientation="vertical"></div>
-    <div class="sftp-panel">
+    <aside class="sftp-panel" aria-label="Files on ${escapeHtml(profile.name)}">
+      <div class="side-panel-header">
+        <div class="side-panel-tabs" role="group" aria-label="Side panel">
+          <span class="side-panel-tab is-active" aria-current="true">${uiIcon("folder")}<span>Files</span></span>
+          <button class="side-panel-tab sftp-agent-tab" type="button" aria-pressed="false" title="Ask an agent to work on this server">${uiIcon("agentFull", "icon icon-agent")}<span>Agent</span><span class="attention-dot sftp-agent-attention" hidden></span></button>
+        </div>
+        <button class="icon-button sftp-close" type="button" title="Hide files" aria-label="Hide files">${uiIcon("close")}</button>
+      </div>
       <div class="sftp-header">
-        <button class="sftp-btn btn-up" title="Up Directory">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="12" y1="19" x2="12" y2="5"></line>
-            <polyline points="5 12 12 5 19 12"></polyline>
-          </svg>
+        <button class="sftp-btn btn-up" type="button" title="Up one folder" aria-label="Up one folder">
+          <svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.arrowUp}</svg>
         </button>
-        <input type="text" class="sftp-path-input" value="/" aria-label="Remote directory" />
-        <button class="sftp-btn btn-refresh" title="Refresh">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M23 4v6h-6M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
-          </svg>
+        <div class="sftp-path" title="Click to type a path">
+          <nav class="sftp-breadcrumb" aria-label="Remote path"></nav>
+          <input type="text" class="sftp-path-input" value="/" aria-label="Remote folder path" spellcheck="false" autocomplete="off" />
+        </div>
+        <button class="sftp-btn btn-refresh" type="button" title="Refresh" aria-label="Refresh">
+          <svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.refresh}</svg>
         </button>
-        <button class="sftp-btn btn-new-folder" title="New Folder">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-            <line x1="12" y1="11" x2="12" y2="17"></line>
-            <line x1="9" y1="14" x2="15" y2="14"></line>
-          </svg>
+        <button class="sftp-btn btn-new-folder" type="button" title="New folder" aria-label="New folder">
+          <svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.folderPlus}</svg>
         </button>
-        <button class="sftp-btn btn-upload" title="Upload File">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-            <polyline points="17 8 12 3 7 8"></polyline>
-            <line x1="12" y1="3" x2="12" y2="15"></line>
-          </svg>
+        <button class="sftp-btn btn-upload" type="button" title="Upload a file" aria-label="Upload a file">
+          <svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.upload}</svg>
         </button>
       </div>
-      <div class="sftp-files-list">
+      <p class="sftp-sync-note" hidden><svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.link}</svg><span>Following the terminal's folder</span></p>
+      <div class="sftp-columns" aria-hidden="true"><span>Name</span><span>Size</span></div>
+      <div class="sftp-files-list" role="list" aria-label="Remote files">
         <!-- Files list populated dynamically -->
       </div>
-    </div>
+    </aside>
   `;
   workspaceViewport.appendChild(sessionContainer);
 
@@ -2912,7 +3054,7 @@ async function connectProfile(profile) {
   connectionStatus.innerHTML = `
     <span class="terminal-connection-message" role="status" aria-live="polite"></span>
   `;
-  sessionContainer.querySelector(".terminal-viewport").appendChild(connectionStatus);
+  sessionContainer.appendChild(connectionStatus);
 
   term.parser.registerOscHandler(7, (uri) => {
     const terminalDirectory = getTerminalDirectoryFromUri(uri);
@@ -3025,7 +3167,7 @@ function showNextSshHostTrustRequest() {
   overlay.className = "modal-overlay ssh-host-trust-overlay";
   overlay.innerHTML = `
     <section class="modal-card ssh-host-trust-card" role="dialog" aria-modal="true" aria-labelledby="ssh-host-trust-title" aria-describedby="ssh-host-trust-description">
-      <div class="modal-header"><h3 id="ssh-host-trust-title"></h3><button class="btn-close ssh-host-trust-close" type="button" aria-label="Close server fingerprint dialog">&times;</button></div>
+      <div class="modal-header"><h3 id="ssh-host-trust-title"></h3><button class="btn-close ssh-host-trust-close" type="button" aria-label="Close server fingerprint dialog"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"></path></svg></button></div>
       <div class="ssh-host-trust-body">
         <p id="ssh-host-trust-description"></p>
         <dl class="ssh-host-trust-details"><dt>Server</dt><dd class="ssh-host-trust-server"></dd><dt>Key type</dt><dd class="ssh-host-trust-key-type"></dd><dt>SHA256 fingerprint</dt><dd class="ssh-host-trust-fingerprint"></dd><dt class="ssh-host-trust-saved-label" hidden>Saved fingerprint</dt><dd class="ssh-host-trust-saved-fingerprint" hidden></dd></dl>
@@ -3137,15 +3279,19 @@ function setSshConnectionStatus(session, status, message) {
   session.connectionStatus = status;
   const busy = status === "connecting" || status === "reconnecting";
   const statusElement = session.container.querySelector(".terminal-connection-status");
+  const bannerWasHidden = statusElement.classList.contains("hidden");
   statusElement.classList.toggle("hidden", status === "connected");
+  statusElement.classList.toggle("is-busy", busy);
   statusElement.querySelector(".terminal-connection-message").textContent = message;
   statusElement.title = message;
   session.container.querySelector(".sftp-panel").inert = status !== "connected";
   session.term.options.disableStdin = status !== "connected";
   const tabElement = document.querySelector(`.terminal-tab[data-id="${session.id}"]`);
   tabElement?.classList.toggle("connection-terminated", status === "disconnected");
-  if (tabElement) updateWorkspaceTabTitle(tabElement, busy ? `${session.name} — Connecting…` : session.name);
+  if (tabElement) updateWorkspaceTabTitle(tabElement, session.name);
   updateSessionToolbar(session);
+  // The status banner takes a grid row above the terminal, so refit when it appears or goes away.
+  if (bannerWasHidden !== statusElement.classList.contains("hidden") && session.fitAddon) fitTerminal(session);
 }
 
 function handleSshDisconnect(session, message) {
@@ -3321,13 +3467,58 @@ function initSftpForSession(session) {
 
   applySftpPanelVisibility(session);
 
-  toggleBtn.addEventListener("click", () => {
-    session.sftpPanelOpen = !session.sftpPanelOpen;
+  const setFilesOpen = (open) => {
+    session.sftpPanelOpen = open;
     applySftpPanelVisibility(session);
     refreshPanelLayout();
     updateSessionToolbar(session);
     saveSftpExplorerState(session);
     setTimeout(() => fitTerminal(session), SFTP_PANEL_TRANSITION_MS);
+  };
+
+  toggleBtn.addEventListener("click", () => {
+    // With the agent open, the files button brings the file browser back instead of hiding it.
+    if (agentUiState.open) {
+      closeAgentPanel();
+      if (!session.sftpPanelOpen) setFilesOpen(true);
+      return;
+    }
+    setFilesOpen(!session.sftpPanelOpen);
+  });
+
+  container.querySelector(".sftp-close")?.addEventListener("click", () => {
+    setFilesOpen(false);
+    toggleBtn.focus();
+  });
+
+  container.querySelector(".sftp-agent-tab")?.addEventListener("click", () => openAgentPanel());
+
+  const pathField = container.querySelector(".sftp-path");
+  const setPathEditing = (editing) => {
+    if (!pathField) return;
+    pathField.classList.toggle("is-editing", editing);
+    if (editing) {
+      pathInput.value = session.currentPath || pathInput.value;
+      pathInput.focus();
+      pathInput.select();
+    }
+  };
+  pathField?.addEventListener("click", (event) => {
+    if (event.target.closest(".sftp-crumb") || pathField.classList.contains("is-editing")) return;
+    setPathEditing(true);
+  });
+  pathInput.addEventListener("blur", () => setPathEditing(false));
+  pathInput.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setPathEditing(false);
+      session.term?.focus();
+    }
+  });
+  container.querySelector(".sftp-breadcrumb")?.addEventListener("click", (event) => {
+    const crumb = event.target.closest(".sftp-crumb");
+    if (!crumb) return;
+    loadSftpDirectory(session, crumb.dataset.path, { syncTerminal: true });
   });
 
   btnUp.addEventListener("click", () => {
@@ -3386,9 +3577,45 @@ function initSftpForSession(session) {
   pathInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       loadSftpDirectory(session, pathInput.value.trim(), { syncTerminal: true });
+      pathInput.blur();
     }
   });
 
+}
+
+const SFTP_BREADCRUMB_VISIBLE_SEGMENTS = 3;
+
+function renderSftpBreadcrumb(session, path) {
+  const breadcrumb = session.container.querySelector(".sftp-breadcrumb");
+  if (!breadcrumb || typeof breadcrumb.replaceChildren !== "function" || typeof document.createElement !== "function") return;
+  const segments = String(path || ROOT_REMOTE_DIRECTORY).split("/").filter(Boolean);
+  const parts = [];
+  const addCrumb = (label, crumbPath, current) => {
+    const crumb = document.createElement("button");
+    crumb.type = "button";
+    crumb.className = "sftp-crumb";
+    crumb.textContent = label;
+    crumb.dataset.path = crumbPath;
+    crumb.title = crumbPath;
+    if (current) crumb.setAttribute("aria-current", "page");
+    parts.push(crumb);
+  };
+  const addText = (className, text) => {
+    const span = document.createElement("span");
+    span.className = className;
+    span.setAttribute("aria-hidden", "true");
+    span.textContent = text;
+    parts.push(span);
+  };
+  addCrumb("/", ROOT_REMOTE_DIRECTORY, segments.length === 0);
+  const firstVisible = Math.max(0, segments.length - SFTP_BREADCRUMB_VISIBLE_SEGMENTS);
+  if (firstVisible > 0) addText("sftp-crumb-ellipsis", "…/");
+  segments.forEach((segment, index) => {
+    if (index < firstVisible) return;
+    if (index > firstVisible || firstVisible === 0 && index > 0) addText("sftp-crumb-separator", "/");
+    addCrumb(segment, ROOT_REMOTE_DIRECTORY + segments.slice(0, index + 1).join("/"), index === segments.length - 1);
+  });
+  breadcrumb.replaceChildren(...parts);
 }
 
 function applySftpPanelVisibility(session) {
@@ -3493,11 +3720,12 @@ async function loadSftpDirectory(session, path, { syncTerminal = false } = {}) {
     session.currentPath = resolvedPath;
     updateSessionToolbar(session);
     if (pathInput) pathInput.value = resolvedPath;
+    renderSftpBreadcrumb(session, resolvedPath);
     saveSftpExplorerState(session);
     if (syncTerminal) await synchronizeTerminalDirectory(session, resolvedPath);
 
     if (files.length === 0) {
-      fileListEl.innerHTML = `<div class="sftp-status">Empty Directory</div>`;
+      fileListEl.innerHTML = `<div class="sftp-status">This folder is empty.</div>`;
       return;
     }
 
@@ -3505,43 +3733,49 @@ async function loadSftpDirectory(session, path, { syncTerminal = false } = {}) {
     files.forEach(file => {
       const item = document.createElement("div");
       item.className = "sftp-item";
+      item.setAttribute("role", "listitem");
       item.dataset.path = file.path;
       item.dataset.isDir = file.is_dir;
-      
+
       const sizeStr = file.is_dir ? "" : formatBytes(file.size);
+      const openLabel = file.is_dir ? `Open folder ${file.name}` : `${file.name}, ${sizeStr}. Press Enter to download.`;
 
       item.innerHTML = `
-        <div class="sftp-item-icon ${file.is_dir ? 'folder' : 'file'}">
-          ${file.is_dir 
-            ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`
-            : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline></svg>`
-          }
-        </div>
-        <span class="sftp-item-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
-        <span class="sftp-item-size">${sizeStr}</span>
+        <button class="sftp-item-main" type="button" title="${escapeHtml(file.name)}" aria-label="${escapeHtml(openLabel)}">
+          <span class="sftp-item-icon ${file.is_dir ? 'folder' : 'file'}"><svg viewBox="0 0 24 24" aria-hidden="true">${file.is_dir ? UI_ICONS.folder : UI_ICONS.file}</svg></span>
+          <span class="sftp-item-name">${escapeHtml(file.name)}</span>
+          <span class="sftp-item-size">${sizeStr}</span>
+        </button>
         <div class="sftp-item-actions">
           ${!file.is_dir ? `
-            <button class="btn-sftp-download sftp-btn" title="Download file">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            <button class="btn-sftp-download sftp-btn" type="button" title="Download" aria-label="Download ${escapeHtml(file.name)}">
+              <svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.download}</svg>
             </button>
           ` : ''}
-          <button class="btn-sftp-delete sftp-btn danger" title="Delete">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+          <button class="btn-sftp-delete sftp-btn danger" type="button" title="Delete" aria-label="Delete ${escapeHtml(file.name)}">
+            <svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.trash}</svg>
           </button>
         </div>
       `;
 
-      item.addEventListener("dblclick", () => {
+      const openItem = () => {
         if (file.is_dir) {
           loadSftpDirectory(session, file.path, { syncTerminal: true });
         } else {
           const downloadBtn = item.querySelector(".btn-sftp-download");
           if (downloadBtn) downloadBtn.click();
         }
+      };
+      const mainButton = item.querySelector(".sftp-item-main");
+      mainButton.addEventListener("dblclick", openItem);
+      mainButton.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        openItem();
       });
 
       // Selection indicator
-      item.addEventListener("click", () => {
+      mainButton.addEventListener("click", () => {
         container.querySelectorAll(".sftp-item").forEach(el => el.classList.remove("selected"));
         item.classList.add("selected");
       });
@@ -3606,11 +3840,409 @@ function formatBytes(bytes, decimals = 2) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }
 
+// --- WORKSPACE CHROME ---
+// Status bar, rail badges, host status dots and agent indicators. These helpers tolerate
+// partial DOMs so session code can call them from anywhere.
+let defaultSshKeyPath = "";
+
+function setChromeAttribute(element, name, value) {
+  if (element && typeof element.setAttribute === "function") element.setAttribute(name, value);
+}
+
+function setChromeClass(element, className, enabled) {
+  const classList = element?.classList;
+  if (!classList || typeof classList.add !== "function" || typeof classList.remove !== "function") return;
+  if (enabled) classList.add(className);
+  else classList.remove(className);
+}
+
+function setWorkspaceTabStatus(sessionId, status) {
+  if (typeof document.querySelector !== "function") return;
+  setChromeAttribute(document.querySelector(`.terminal-tab[data-id="${sessionId}"]`), "data-status", status);
+}
+
+function getSessionConnectionState(session) {
+  if (!session) return "none";
+  if (session.kind === "ssh") {
+    const status = session.connectionStatus || "connecting";
+    return status === "reconnecting" ? "connecting" : status;
+  }
+  if (session.kind === "local") return session.isClosed ? "disconnected" : session.isReady ? "connected" : "connecting";
+  return "none";
+}
+
+function findSessionsForProfile(profileId) {
+  return Object.values(activeSessions).filter(session =>
+    session.kind === "ssh" && !session.isClosing && session.connectionProfile?.id === profileId
+  );
+}
+
+function openOrSwitchToProfile(profile) {
+  const existing = findSessionsForProfile(profile.id).at(-1);
+  if (existing) switchTab(existing.id);
+  else connectProfile(profile);
+}
+
+function updateHostIndicators() {
+  if (typeof document.querySelectorAll !== "function") return;
+  const rank = { connected: 3, connecting: 2, disconnected: 1 };
+  const states = new Map();
+  Object.values(activeSessions).forEach(session => {
+    const profileId = session.kind === "ssh" && !session.isClosing ? session.connectionProfile?.id : null;
+    if (!profileId) return;
+    const state = getSessionConnectionState(session);
+    const current = states.get(profileId);
+    if (!current || rank[state] > rank[current]) states.set(profileId, state);
+  });
+  const activeSession = activeSessions[activeTabId];
+  const activeProfileId = activeSession?.kind === "ssh" ? activeSession.connectionProfile?.id : null;
+  const stateLabels = { connected: ", connected", connecting: ", connecting", disconnected: ", disconnected" };
+  document.querySelectorAll(".profile-item[data-profile-id]").forEach(item => {
+    const profileId = item.getAttribute("data-profile-id");
+    const state = states.get(profileId);
+    setChromeClass(item, "is-connected", state === "connected");
+    setChromeClass(item, "is-connecting", state === "connecting");
+    setChromeClass(item, "is-disconnected", state === "disconnected");
+    setChromeClass(item, "is-active", Boolean(activeProfileId) && profileId === activeProfileId);
+    const stateLabel = item.querySelector(".profile-state-label");
+    if (stateLabel) stateLabel.textContent = stateLabels[state] || "";
+  });
+}
+
+function normalizeVpnServer(value) {
+  return String(value || "").trim().toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, "").replace(/[/:].*$/, "");
+}
+
+// Prefer the saved shortcut name ("Corporate") over the raw server address vpncli reports.
+function getVpnDisplayName() {
+  const server = normalizeVpnServer(vpnStatusSnapshot.server);
+  if (!server) return null;
+  const profiles = typeof savedVpnProfiles !== "undefined" && Array.isArray(savedVpnProfiles) ? savedVpnProfiles : [];
+  return profiles.find(profile => normalizeVpnServer(profile.server) === server)?.name || vpnStatusSnapshot.server;
+}
+
+function refreshWorkspaceChrome() {
+  if (typeof document.getElementById !== "function") return;
+  const activeSession = activeSessions[activeTabId];
+
+  const connectionLabel = document.getElementById("status-connection-label");
+  if (connectionLabel) {
+    let state = "none";
+    let label = "No session";
+    let detail = "";
+    if (activeSession?.kind === "ssh") {
+      state = getSessionConnectionState(activeSession);
+      label = state === "connected" ? "Connected"
+        : state === "disconnected" ? "Disconnected"
+          : activeSession.connectionStatus === "reconnecting" ? "Reconnecting" : "Connecting";
+      const profile = activeSession.connectionProfile || {};
+      detail = `${profile.username}@${activeSession.host}:${profile.port}`;
+    } else if (activeSession?.kind === "local") {
+      state = getSessionConnectionState(activeSession);
+      label = state === "connected" ? "Ready" : state === "disconnected" ? "Exited" : "Starting";
+      detail = activeSession.workingDirectory || LOCAL_TERMINAL_SHELLS[activeSession.shell] || "";
+    } else if (activeSession) {
+      label = activeSession.name;
+    }
+    setChromeAttribute(document.getElementById("status-connection-dot"), "data-state", state);
+    connectionLabel.textContent = label;
+    const connectionDetail = document.getElementById("status-connection-detail");
+    if (connectionDetail) connectionDetail.textContent = detail;
+  }
+
+  const vpnState = vpnStatusSnapshot.state === "connected" || vpnStatusSnapshot.state === "disconnected" ? vpnStatusSnapshot.state : "unknown";
+  const vpnItem = document.getElementById("status-vpn");
+  setChromeClass(vpnItem, "hidden", !appSettings.showVpnTab);
+  setChromeAttribute(document.getElementById("status-vpn-dot"), "data-state", vpnState);
+  const vpnLabel = document.getElementById("status-vpn-label");
+  if (vpnLabel) {
+    vpnLabel.textContent = vpnState === "connected" ? `VPN ${getVpnDisplayName() || "connected"}`
+      : vpnState === "disconnected" ? "VPN off" : "VPN";
+  }
+  setChromeAttribute(document.getElementById("rail-vpn-badge"), "data-state", vpnState);
+
+  const agentOpen = Boolean(agentUiState.open);
+  if (typeof document.querySelector === "function") setChromeClass(document.querySelector(".app-container"), "agent-open", agentOpen);
+  const attention = document.getElementById("automation-attention");
+  if (attention) attention.hidden = !agentUiState.review;
+  const filesTab = document.getElementById("automation-files-tab");
+  if (filesTab) {
+    filesTab.disabled = activeSession?.kind !== "ssh";
+    filesTab.title = activeSession?.kind === "ssh" ? "Show files for this server" : "Files are available for SSH sessions";
+  }
+  if (typeof document.querySelectorAll === "function") {
+    document.querySelectorAll(".session-agent-toggle").forEach(button => setChromeAttribute(button, "aria-pressed", String(agentOpen)));
+    document.querySelectorAll(".sftp-agent-attention").forEach(dot => { dot.hidden = !agentUiState.review; });
+    const agentSession = agentUiState.running && agentUiState.targetSessionId
+      ? Object.values(activeSessions).find(session => session.kind === "ssh" && session.connectionId === agentUiState.targetSessionId)
+      : null;
+    document.querySelectorAll(".terminal-tab").forEach(tab => {
+      setChromeClass(tab, "has-agent", Boolean(agentSession) && tab.getAttribute?.("data-id") === agentSession.id);
+    });
+  }
+
+  updateHostIndicators();
+}
+
+function handleAgentPanelLayoutChange() {
+  const panel = typeof document.getElementById === "function" ? document.getElementById("automation-panel") : null;
+  agentUiState = { ...agentUiState, open: Boolean(panel && panel.hidden === false) };
+  refreshPanelLayout();
+  Object.values(activeSessions).forEach(session => {
+    if (session.kind === "ssh" && session.term && session.container) updateSessionToolbar(session);
+  });
+  refreshWorkspaceChrome();
+}
+
+function toggleAgentPanel() {
+  document.getElementById("btn-automation-toggle")?.click();
+}
+
+function openAgentPanel() {
+  if (!agentUiState.open) toggleAgentPanel();
+}
+
+function closeAgentPanel() {
+  if (agentUiState.open) toggleAgentPanel();
+}
+
+async function refreshDefaultKeyCache() {
+  try {
+    const keys = await invoke("get_default_ssh_keys");
+    defaultSshKeyPath = Array.isArray(keys) && keys.length ? String(keys[0]) : "";
+  } catch {
+    defaultSshKeyPath = "";
+  }
+}
+
+function closeOpenMenus(except = null) {
+  document.querySelectorAll("details.menu[open]").forEach(menu => {
+    if (menu !== except) menu.removeAttribute("open");
+  });
+}
+
+function initWorkspaceChrome() {
+  document.getElementById("rail-settings")?.addEventListener("click", openSettingsTab);
+  document.getElementById("btn-quick-connect")?.addEventListener("click", () => openCommandPalette("connect"));
+  document.getElementById("btn-command-palette")?.addEventListener("click", () => openCommandPalette("all"));
+  document.getElementById("status-palette")?.addEventListener("click", () => openCommandPalette("all"));
+  document.getElementById("status-vpn")?.addEventListener("click", () => activateSidebarView("vpn", { keepOpen: true }));
+  document.getElementById("automation-files-tab")?.addEventListener("click", () => {
+    const session = activeSessions[activeTabId];
+    if (session?.kind !== "ssh") return;
+    closeAgentPanel();
+    if (!session.sftpPanelOpen) session.container.querySelector(".session-files-toggle")?.click();
+    session.container.querySelector(".sftp-close")?.focus();
+  });
+
+  document.addEventListener("click", event => {
+    const menu = event.target?.closest?.("details.menu");
+    closeOpenMenus(menu || null);
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape") return;
+    const openMenu = document.querySelector("details.menu[open]");
+    if (!openMenu) return;
+    openMenu.removeAttribute("open");
+    openMenu.querySelector("summary")?.focus();
+  });
+
+  initHostFilter();
+  refreshDefaultKeyCache();
+  document.fonts?.ready?.then(() => {
+    Object.values(activeSessions).forEach(session => {
+      if (session.term && session.fitAddon) fitTerminal(session);
+    });
+  });
+  refreshWorkspaceChrome();
+}
+
+// --- COMMAND PALETTE ---
+function openCommandPalette(mode = "all") {
+  if (commandPalette) {
+    closeOpenMenus();
+    commandPalette.open(mode);
+    return;
+  }
+  if (mode === "connect") showQuickConnectModal();
+  else showNotification("The command palette could not load. Rebuild SleekSSH with npm run tauri.");
+}
+
+function readSavedLocalLocations() {
+  try {
+    const load = window.SleekSshLocalTerminals?.loadLocations;
+    return typeof load === "function" ? load(localStorage) : [];
+  } catch {
+    return [];
+  }
+}
+
+function buildCommandPaletteItems() {
+  const items = [];
+  const activeSession = activeSessions[activeTabId];
+  const hostRank = profile => (findSessionsForProfile(profile.id).length ? 0 : 1);
+  [...savedProfiles]
+    .sort((left, right) => hostRank(left) - hostRank(right) || left.name.localeCompare(right.name))
+    .forEach(profile => {
+      const session = findSessionsForProfile(profile.id).at(-1);
+      const folders = profile.namespace ? profile.namespace.split(NAMESPACE_SEPARATOR).map(segment => segment.trim()).filter(Boolean) : [];
+      items.push({
+        id: `host:${profile.id}`,
+        group: "Hosts",
+        title: profile.name,
+        subtitle: `${profile.username}@${profile.host}:${profile.port}`,
+        detail: folders.join(" / "),
+        keywords: [profile.host, profile.username, profile.namespace].filter(Boolean).join(" "),
+        icon: "server",
+        status: session ? getSessionConnectionState(session) : null,
+        hint: session ? "Switch to tab" : "Connect",
+        run: ({ ctrlKey }) => (ctrlKey ? connectProfile(profile) : openOrSwitchToProfile(profile))
+      });
+    });
+
+  items.push({ id: "shell:powershell", group: "Local shells", title: "PowerShell", icon: "terminal", shortcut: ["Ctrl", "Alt", "T"], hint: "Open", run: () => openLocalTerminal("powershell") });
+  items.push({ id: "shell:cmd", group: "Local shells", title: "Command Prompt", icon: "terminal", hint: "Open", run: () => openLocalTerminal("cmd") });
+  readSavedLocalLocations().forEach(location => {
+    items.push({
+      id: `location:${location.id}`,
+      group: "Local shells",
+      title: `PowerShell in ${location.name}`,
+      subtitle: location.path,
+      keywords: location.path,
+      icon: "folder",
+      hint: "Open",
+      run: () => openLocalTerminal("powershell", location.path, location.name)
+    });
+  });
+
+  const actions = [];
+  if (activeSession?.kind === "ssh" && activeSession.connectionStatus === "disconnected") {
+    actions.push({ id: "action:reconnect", title: `Reconnect ${activeSession.name}`, icon: "refresh", run: () => reconnectSshSession(activeSession) });
+  }
+  if (activeSession?.kind === "ssh") {
+    actions.push({ id: "action:agent", title: agentUiState.open ? "Hide the agent" : "Ask the agent to work on this server", detail: "Claude Code or Codex", icon: "agent", run: toggleAgentPanel });
+  }
+  if (activeSession?.term) {
+    actions.push({ id: "action:find", title: "Find in terminal", icon: "search", shortcut: ["Ctrl", "F"], run: () => openTerminalSearch(activeSession) });
+  }
+  actions.push({ id: "action:new-host", title: "New host", detail: "Save a server to Hosts", icon: "plus", run: () => showProfileModal() });
+  actions.push({ id: "action:quick-connect", title: "Quick connect form", detail: "Key file, passphrase or password", icon: "form", keywords: "connect ssh password", run: () => showQuickConnectModal() });
+  actions.push({ id: "action:ports", title: "Port Killer", detail: "Find and stop local listeners", icon: "ports", keywords: "ports kill process", run: openPortKillerTab });
+  actions.push({ id: "action:keys", title: "SSH keys", detail: "Browse ~/.ssh or generate Ed25519", icon: "key", run: () => activateSidebarView("keys", { keepOpen: true }) });
+  if (appSettings.showVpnTab) {
+    const vpnName = vpnStatusSnapshot.state === "connected" ? getVpnDisplayName() : null;
+    const vpnDetail = vpnStatusSnapshot.state === "connected" ? (vpnName ? `${vpnName} · connected` : "Connected") : "Cisco VPN shortcuts";
+    actions.push({ id: "action:vpn", title: "VPN", detail: vpnDetail, icon: "shield", status: vpnStatusSnapshot.state === "connected" ? "connected" : null, run: () => activateSidebarView("vpn", { keepOpen: true }) });
+  }
+  actions.push({ id: "action:sidebar", title: isSidebarVisible() ? "Hide sidebar" : "Show sidebar", icon: "panel", run: toggleSidebarPanel });
+  actions.push({ id: "action:settings", title: "Settings", detail: "Font size, zoom, SSH defaults", icon: "gear", run: openSettingsTab });
+  if (activeSession) {
+    actions.push({ id: "action:close-tab", title: `Close ${activeSession.name}`, icon: "close", shortcut: ["Ctrl", "W"], run: () => closeTab(activeSession.id) });
+  }
+  actions.forEach(action => items.push({ group: "Actions", ...action }));
+  return items;
+}
+
+function buildQuickConnectPaletteItems(target) {
+  if (!target) {
+    return [{
+      id: "connect:form",
+      group: "Quick connect",
+      title: "Open the connection form",
+      subtitle: "Choose a key file, passphrase or password",
+      icon: "form",
+      run: () => showQuickConnectModal()
+    }];
+  }
+  const username = target.username || appSettings.defaultUser || "";
+  const port = target.port || appSettings.defaultPort || 22;
+  const prefill = { host: target.host, port, username };
+  const keyName = defaultSshKeyPath ? defaultSshKeyPath.split(/[\\/]/).pop() : "";
+  const items = [];
+  if (username) {
+    items.push({
+      id: "connect:key",
+      group: "Quick connect",
+      title: "Connect to",
+      code: `${username}@${target.host}:${port}`,
+      subtitle: `User ${username} · Port ${port} · ${keyName ? `Key ~/.ssh/${keyName}` : "Key from ~/.ssh"} · Not saved`,
+      icon: "bolt",
+      shortcut: ["Enter"],
+      run: ({ ctrlKey, shiftKey }) => {
+        if (ctrlKey) showProfileModal(null, { ...prefill, name: target.host });
+        else if (shiftKey) showQuickConnectModal({ ...prefill, usePassword: true });
+        else quickConnectWithDefaultKey(prefill);
+      }
+    });
+  } else {
+    items.push({
+      id: "connect:needs-user",
+      group: "Quick connect",
+      title: "Connect to",
+      code: `${target.host}:${port}`,
+      subtitle: "Add a username in the connection form, or set a default user in Settings",
+      icon: "bolt",
+      shortcut: ["Enter"],
+      run: ({ ctrlKey }) => (ctrlKey ? showProfileModal(null, { ...prefill, name: target.host }) : showQuickConnectModal(prefill))
+    });
+  }
+  items.push({
+    id: "connect:password",
+    group: "Quick connect",
+    title: "Connect with a password",
+    subtitle: "You are asked for it next. Nothing is saved.",
+    icon: "lock",
+    shortcut: ["Shift", "Enter"],
+    run: () => showQuickConnectModal({ ...prefill, usePassword: true })
+  });
+  items.push({
+    id: "connect:save",
+    group: "Quick connect",
+    title: "Save as a new host",
+    subtitle: "Opens the host form with these details filled in.",
+    icon: "plus",
+    shortcut: ["Ctrl", "Enter"],
+    run: () => showProfileModal(null, { ...prefill, name: target.host })
+  });
+  return items;
+}
+
+async function quickConnectWithDefaultKey({ host, port, username }) {
+  if (!defaultSshKeyPath) await refreshDefaultKeyCache();
+  if (!defaultSshKeyPath) {
+    showNotification("No private key found in ~/.ssh. Choose a key file or use a password.");
+    showQuickConnectModal({ host, port, username });
+    return;
+  }
+  connectProfile({
+    id: `qc_${Date.now()}`,
+    name: host,
+    host,
+    port,
+    username,
+    key_path: defaultSshKeyPath,
+    passphrase: null,
+    password: null,
+    use_password: false
+  });
+}
+
+function initCommandPaletteIntegration() {
+  const root = document.getElementById("command-palette");
+  if (!root || !window.SleekSshCommandPalette) return;
+  commandPalette = window.SleekSshCommandPalette.initCommandPalette({
+    root,
+    getItems: buildCommandPaletteItems,
+    getConnectItems: buildQuickConnectPaletteItems,
+    connectNote: "A server you have not trusted yet shows its SHA256 fingerprint before you log in. Compare it with a trusted source, then choose Trust and connect."
+  });
+}
+
 // --- PORT KILLER ---
 let allPorts = [];
 
 function initPortKiller() {
-  document.getElementById("titlebar-port-killer").addEventListener("click", openPortKillerTab);
+  document.getElementById("rail-port-killer")?.addEventListener("click", openPortKillerTab);
 }
 
 function openPortKillerTab() {
@@ -3630,25 +4262,25 @@ function openPortKillerTab() {
   container.className = "session-container active";
   container.dataset.id = tabId;
   container.innerHTML = `
-    <div class="port-killer-viewport">
-      <div class="port-killer-card">
-        <div class="port-killer-header">
-          <div class="port-killer-title">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10"></circle>
-              <line x1="22" y1="12" x2="18" y2="12"></line>
-              <line x1="6" y1="12" x2="2" y2="12"></line>
-              <line x1="12" y1="6" x2="12" y2="2"></line>
-              <line x1="12" y1="22" x2="12" y2="18"></line>
-            </svg>
-            Port Killer
+    <div class="tool-page port-killer-viewport">
+      <div class="tool-page-inner">
+        <header class="tool-page-header">
+          <div>
+            <h2>Port Killer</h2>
+            <p id="port-killer-count" class="port-killer-count" role="status" aria-live="polite">Local listening ports and the processes that own them.</p>
           </div>
-          <div class="port-killer-controls">
-            <input type="text" id="port-filter" placeholder="Filter by port or process..." />
-            <button class="btn btn-secondary btn-small" id="btn-refresh-ports">Refresh</button>
+          <div class="tool-page-controls">
+            <div class="pane-search">
+              <label class="sr-only" for="port-filter">Filter ports</label>
+              ${uiIcon("search")}
+              <input type="search" id="port-filter" placeholder="Filter by port or process" autocomplete="off" spellcheck="false" />
+            </div>
+            <button class="btn btn-secondary btn-small" id="btn-refresh-ports" type="button">Refresh</button>
           </div>
+        </header>
+        <div class="ports-table-header" aria-hidden="true">
+          <span>Protocol</span><span>Port</span><span>State</span><span>Process</span><span>PID</span><span></span>
         </div>
-        <div id="port-killer-count" class="port-killer-count"></div>
         <div id="ports-list" class="ports-table"></div>
       </div>
     </div>
@@ -3675,8 +4307,8 @@ async function loadPorts() {
   const countEl = document.getElementById("port-killer-count");
   if (!listEl) return;
 
-  listEl.innerHTML = `<div class="empty-state">Scanning ports...</div>`;
-  if (countEl) countEl.textContent = "";
+  listEl.innerHTML = `<div class="empty-state">Scanning ports…</div>`;
+  if (countEl) countEl.textContent = "Scanning local ports…";
 
   try {
     allPorts = await invoke("list_listening_ports");
@@ -3701,7 +4333,9 @@ function renderPorts() {
   });
 
   if (countEl) {
-    countEl.textContent = `${filtered.length} port${filtered.length !== 1 ? "s" : ""} found${filter ? " (filtered)" : ""}`;
+    countEl.textContent = filter
+      ? `${filtered.length} of ${allPorts.length} port${allPorts.length !== 1 ? "s" : ""} match “${filter}”`
+      : `${filtered.length} port${filtered.length !== 1 ? "s" : ""} in use on this machine`;
   }
 
   if (filtered.length === 0) {
@@ -3717,12 +4351,12 @@ function renderPorts() {
     const stateClass = entry.state.toLowerCase() === "listening" ? " listening" : "";
 
     row.innerHTML = `
-      <span class="port-badge ${entry.protocol.toLowerCase()}">${escapeHtml(entry.protocol)}</span>
+      <span class="port-badge ${escapeHtml(entry.protocol.toLowerCase())}">${escapeHtml(entry.protocol)}</span>
       <span class="port-number">:${entry.local_port}</span>
-      <span class="port-state${stateClass}">${escapeHtml(entry.state) || "—"}</span>
+      <span class="port-state${stateClass}">${escapeHtml(entry.state) || "Unknown"}</span>
       <span class="port-process" title="${escapeHtml(entry.process_name)}">${escapeHtml(entry.process_name)}</span>
-      <span class="port-pid">PID ${entry.pid}</span>
-      <button class="btn-kill">Kill</button>
+      <span class="port-pid">${entry.pid}</span>
+      <button class="btn-kill" type="button" aria-label="Kill ${escapeHtml(entry.process_name)} on port ${entry.local_port}">Kill</button>
     `;
 
     row.querySelector(".btn-kill").addEventListener("click", async (e) => {
@@ -3769,23 +4403,29 @@ function openSettingsTab() {
   settingsContainer.className = "session-container active";
   settingsContainer.dataset.id = settingsTabId;
   settingsContainer.innerHTML = `
-    <div class="settings-tab-viewport" style="flex: 1; overflow-y: auto; padding: 40px 20px;">
-      <div class="settings-content-wrapper" style="max-width: 600px; margin: 0 auto; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 12px; box-shadow: 0 15px 35px rgba(0,0,0,0.3); overflow: hidden;">
-        <div class="settings-tab-header" style="padding: 24px 30px; border-bottom: 1px solid var(--border-color); background: rgba(0, 0, 0, 0.15);">
-          <h2 style="font-size: 1.25rem; color: #fff; display: flex; align-items: center; gap: 10px; margin: 0;">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
-            Application Settings
-          </h2>
-          <p style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 6px; margin-bottom: 0;">Configure terminal visual styles, layout zoom scaling, and connection defaults.</p>
-        </div>
-        <div class="settings-tab-body" style="padding: 30px; display: flex; flex-direction: column; gap: 20px;">
-          <div class="form-group">
-            <label>Terminal Font Size (px)</label>
-            <input type="number" id="setting-font-size" min="10" max="30" value="${appSettings.fontSize}" required />
+    <div class="tool-page settings-tab-viewport">
+      <div class="tool-page-inner settings-page">
+        <header class="tool-page-header">
+          <div>
+            <h2>Settings</h2>
+            <p>Changes save and apply right away.</p>
           </div>
-          <div class="form-group">
-            <label>Window Zoom Level</label>
-            <select id="setting-zoom-level" style="background: rgba(0, 0, 0, 0.25); border: 1px solid var(--border-color); border-radius: 6px; padding: 10px 12px; color: #fff; font-family: var(--font-sans); font-size: 0.85rem; width: 100%;">
+        </header>
+        <section class="settings-section" aria-labelledby="settings-terminal-heading">
+          <h3 class="section-label" id="settings-terminal-heading">Terminal and window</h3>
+          <div class="settings-row">
+            <div class="settings-row-text">
+              <label for="setting-font-size">Terminal font size</label>
+              <p>Size of terminal text, in pixels.</p>
+            </div>
+            <input type="number" id="setting-font-size" min="10" max="30" value="${escapeHtml(String(appSettings.fontSize))}" required />
+          </div>
+          <div class="settings-row">
+            <div class="settings-row-text">
+              <label for="setting-zoom-level">Window zoom</label>
+              <p>Scales the whole window. Ctrl+Plus and Ctrl+Minus also work.</p>
+            </div>
+            <select id="setting-zoom-level">
               <option value="0.5">50%</option>
               <option value="0.6">60%</option>
               <option value="0.7">70%</option>
@@ -3801,26 +4441,37 @@ function openSettingsTab() {
               <option value="2.0">200%</option>
             </select>
           </div>
-          <div class="form-group">
-            <label>Default SSH Username</label>
-            <input type="text" id="setting-default-user" value="${appSettings.defaultUser}" placeholder="root" />
-          </div>
-          <div class="form-group">
-            <label>Default SSH Port</label>
-            <input type="number" id="setting-default-port" value="${appSettings.defaultPort}" />
-          </div>
-          <div class="switch-group">
-            <div class="switch-label-wrapper">
-              <span class="switch-title">Enable VPN Switcher Tab</span>
-              <span class="switch-description">Show or hide the Cisco AnyConnect VPN integration tab in the sidebar.</span>
+        </section>
+        <section class="settings-section" aria-labelledby="settings-ssh-heading">
+          <h3 class="section-label" id="settings-ssh-heading">SSH defaults</h3>
+          <div class="settings-row">
+            <div class="settings-row-text">
+              <label for="setting-default-user">Default username</label>
+              <p>Used by quick connect when you type a host without a user.</p>
             </div>
-            <label class="switch">
-              <input type="checkbox" id="setting-show-vpn" ${appSettings.showVpnTab ? "checked" : ""} />
-              <span class="slider"></span>
-            </label>
+            <input type="text" id="setting-default-user" value="${escapeHtml(appSettings.defaultUser)}" placeholder="root" />
           </div>
-          <p class="helper-text" style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 5px; margin-bottom: 0;">Settings are automatically saved and applied instantly.</p>
-        </div>
+          <div class="settings-row">
+            <div class="settings-row-text">
+              <label for="setting-default-port">Default port</label>
+              <p>Used for new hosts and quick connect.</p>
+            </div>
+            <input type="number" id="setting-default-port" value="${escapeHtml(String(appSettings.defaultPort))}" />
+          </div>
+        </section>
+        <section class="settings-section" aria-labelledby="settings-integrations-heading">
+          <h3 class="section-label" id="settings-integrations-heading">Integrations</h3>
+          <div class="settings-row switch-group">
+            <div class="switch-label-wrapper">
+              <label class="switch-title" for="setting-show-vpn">Cisco VPN switcher</label>
+              <span class="switch-description">Adds a VPN view to the left rail for Cisco Secure Client or AnyConnect.</span>
+            </div>
+            <span class="switch">
+              <input type="checkbox" id="setting-show-vpn" ${appSettings.showVpnTab ? "checked" : ""} />
+              <span class="slider" aria-hidden="true"></span>
+            </span>
+          </div>
+        </section>
       </div>
     </div>
   `;
