@@ -16,13 +16,19 @@ See the [release notes](RELEASE_NOTES.md) and [all releases](https://github.com/
 
 ## Screenshots
 
-![SleekSSH workspace with connection folders, terminal tabs, and SFTP](docs/screenshots/workspace.png)
+These SleekSSH v0.3.0 screenshots use fictional hosts, files, terminal output, and agent responses.
 
-The workspace uses sample connections, terminal output, and remote files.
+![SleekSSH workspace with grouped hosts, terminal tabs, and the Files browser](docs/screenshots/workspace.jpg)
 
-![SleekSSH automation panel with a conversation and command approval](docs/screenshots/automation.png)
+Grouped hosts, terminal tabs, and remote files in the refreshed workspace.
 
-The automation view uses a sample conversation and command approval.
+![SleekSSH Agent conversation with command results and a pending command approval](docs/screenshots/automation.jpg)
+
+The Agent panel shows command results and waits for explicit approval before running the next command.
+
+![SleekSSH command palette searching hosts and saved PowerShell folders](docs/screenshots/command-palette.jpg)
+
+Press **Ctrl+Shift+P** to search hosts, saved PowerShell folders, and workspace tools.
 
 ## Your workspace
 
