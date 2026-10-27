@@ -6,7 +6,7 @@
   "scripts": {
     "build:frontend": "tsc -p tsconfig.automation.json --noEmit && node scripts/build-frontend.ts",
     "test": "npm run build:frontend && node --test tests/*.test.ts",
-    "tauri": "npm run build:frontend && tauri"
+    "tauri": "tauri"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

@@ -4,6 +4,11 @@
   "version": "0.2.0",
   "identifier": "com.chandanbhagat.tauri-app",
   "build": {
+    "beforeBuildCommand": "npm run build:frontend",
+    "beforeDevCommand": {
+      "script": "npm run build:frontend",
+      "wait": true
+    },
     "frontendDist": "../src"
   },
   "app": {
