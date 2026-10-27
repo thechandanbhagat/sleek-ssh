@@ -2,12 +2,12 @@
 
 A Windows desktop workspace for SSH sessions, local terminals, SFTP, and command-by-command Claude Code or Codex automation.
 
-<!-- Documentation owner: repository maintainers. Reviewed for v0.2.0 on 2026-10-20; review on every release. -->
+<!-- Documentation owner: repository maintainers. Reviewed for v0.3.0 on 2026-10-27; review on every release. -->
 
 ## Quick start
 
-1. Install **SleekSSH v0.2.0** for Windows x64: [MSI installer](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.2.0/SleekSSH_0.2.0_x64_en-US.msi) or [EXE installer](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.2.0/SleekSSH_0.2.0_x64-setup.exe).
-2. Launch SleekSSH. In **Terminal**, open PowerShell or Command Prompt; use **Connections** to add an SSH profile with your server, username, and password or private key.
+1. Install **SleekSSH v0.3.0** for Windows x64: [MSI installer](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.3.0/SleekSSH_0.3.0_x64_en-US.msi) or [EXE installer](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.3.0/SleekSSH_0.3.0_x64-setup.exe).
+2. Launch SleekSSH. In **Local shells**, open PowerShell or Command Prompt; use **Hosts** to add an SSH profile with your server, username, and password or private key.
 3. For a new SSH server, compare its displayed fingerprint with a trusted source before accepting it.
 
 While SleekSSH is running, **Ctrl+Alt+T** brings it forward and opens PowerShell. The app registers itself to launch at Windows startup.
@@ -27,12 +27,13 @@ The automation view uses a sample conversation and command approval.
 ## Your workspace
 
 - **SSH and local terminals:** Keep remote sessions, PowerShell, and Command Prompt in separate tabs. Reconnect a disconnected SSH session from its terminal toolbar.
-- **Saved PowerShell locations:** In **Terminal → Saved locations → Add location**, choose or enter a folder and save it with an optional name. Click the saved location to open PowerShell in that folder. Locations are remembered between app launches and can be edited or removed.
-- **Connections and layout:** Organize saved connections in nested folders. Folder collapse state, sidebar width, and SFTP pane width are remembered.
+- **Saved PowerShell locations:** In **Local shells → Saved locations → Add location**, choose or enter a folder and save it with an optional name. Click the saved location to open PowerShell in that folder. Locations are remembered between app launches and can be edited or removed.
+- **Hosts and layout:** Organize saved hosts in nested folders and filter them by name or address. Clicking a host that is already open switches to its tab; **Ctrl+click** opens another session. Folder collapse state, sidebar width, and SFTP pane width are remembered.
+- **Command palette:** Press **Ctrl+Shift+P**, or click the search box in the title bar, to jump to hosts, shells, and tools. Type `user@host` or `user@host:port` to connect without saving; **Ctrl+Alt+N** opens the palette in quick connect mode.
 - **Terminal controls:** Copy with **Ctrl+Shift+C**, paste with **Ctrl+Shift+V**, and search with **Ctrl+F**. A context menu also provides copy, paste, and selection controls.
 - **SFTP:** Browse remote directories, upload and download files through native file dialogs, create folders, and delete remote files or directories.
 - **SSH keys:** Discover private keys in `~/.ssh`, select a custom key, or generate a new keypair.
-- **Optional Cisco VPN:** Enable **VPN Switcher Tab** in Settings; it is hidden by default. With Cisco Secure Client or AnyConnect installed, import profile shortcuts, switch connections, disconnect, and check status.
+- **Optional Cisco VPN:** Enable **Cisco VPN switcher** in Settings; it is hidden by default. With Cisco Secure Client or AnyConnect installed, import profile shortcuts, switch connections, disconnect, and check status.
 
 Saved connection and VPN credentials use Windows DPAPI encryption. SSH server trust is checked before authentication; a changed host key blocks the connection and displays both the saved and presented fingerprints.
 
@@ -45,8 +46,8 @@ Edit a connection, save a **separate sudo password**, enable its shortcut, and r
 ### Start a task
 
 1. Install and authenticate Claude Code or Codex locally before starting SleekSSH. Use **Refresh** after installing a CLI; restart SleekSSH after changing PATH.
-2. Connect to an SSH server, select its terminal tab, and open **Automation**.
-3. Choose the provider, enter your task, and select **Run task**.
+2. Connect to an SSH server, select its terminal tab, and open **Agent** from the session toolbar or the status bar.
+3. Choose the provider, enter your task, and select **Run task** (or press **Ctrl+Enter**).
 4. Review every proposed remote command and choose **Approve once** or **Deny**.
 
 The CLI runs locally with its configured authentication; SleekSSH adds no OAuth sign-in. Neither CLI needs installing on the remote server, and SSH credentials are not passed to the CLI. This integration was verified with Claude Code **2.1.268** and Codex CLI **0.154.0**; older versions without the required isolation flags need updating.
@@ -113,7 +114,7 @@ npm test
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 ```
 
-Use the npm Tauri commands so the automation TypeScript is checked and compiled before Tauri starts. Generated files in `src/generated/` are ignored by Git.
+Both npm and Cargo Tauri commands automatically typecheck and compile the frontend before development or installer builds. You can also build installers with `cargo tauri build`. Generated files in `src/generated/` are ignored by Git and are rebuilt by these hooks.
 
 The app uses **Tauri v2**, **Rust**, **Tokio**, and **ssh2**, with an HTML/CSS and JavaScript frontend, TypeScript automation modules, **xterm.js**, and **markdown-it**.
 
