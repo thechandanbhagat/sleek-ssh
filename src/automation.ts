@@ -9,7 +9,10 @@ type Approval = Readonly<{ requestId: string; command: string }>;
 type SudoConsent = Approval & Readonly<{ message: string }>;
 type SudoResponse = Readonly<{ requestId: string; approved: boolean }>;
 type Run = Readonly<{ id: string; target: Target; provider: ProviderId; stopping: boolean }>;
-type OutputBlock = Readonly<{ format: "markdown" | "log"; text: string }>;
+type EventTone = "ok" | "danger" | "muted";
+type OutputBlock = Readonly<{ id: number; format: "markdown" | "log" | "task" | "command" | "event"; text: string; agent?: string; command?: string; tone?: EventTone }>;
+type CommandState = Readonly<{ kind: "running" | "ok" | "failed" | "done" | "idle"; label: string }>;
+export type AutomationUiState = Readonly<{ open: boolean; running: boolean; review: boolean; targetSessionId: string | null }>;
 type AutomationEvent = {
   run_id: string;
   session_id: string;
@@ -23,6 +26,7 @@ type AutomationOptions = {
   listen: (name: string, callback: (event: { payload: unknown }) => void) => Promise<() => void>;
   getSelectedTarget: () => Target | null;
   onLayoutChange: () => void;
+  onStateChange?: (state: AutomationUiState) => void;
   document?: Document;
   createRunId?: () => string;
   storage?: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null;
@@ -41,6 +45,24 @@ const MAX_CHAT_PROJECT_CHARACTERS = 48;
 const MAX_CHAT_WARNING_CHARACTERS = 160;
 const MAX_VISIBLE_CHAT_WARNINGS = 3;
 const SUDO_ALLOWED_MESSAGE = "Saved sudo password allowed for this run.";
+const APPROVAL_TIMEOUT_MS = 5 * 60_000;
+const SUDO_CONSENT_TIMEOUT_MS = 90_000;
+const COUNTDOWN_INTERVAL_MS = 1_000;
+const THREAD_FOLLOW_THRESHOLD_PX = 48;
+const EXIT_STATUS_PATTERN = /Exit status: (-?\d+)/g;
+const COMMAND_ICONS: Readonly<Record<CommandState["kind"], string>> = {
+  running: '<path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5"></path>',
+  ok: '<path d="M5 12.5l4.5 4.5L19 7.5"></path>',
+  failed: '<path d="M7 7l10 10M17 7L7 17"></path>',
+  done: '<path d="M5 12.5l4.5 4.5L19 7.5"></path>',
+  idle: '<path d="M5 7l5 5-5 5M12.5 17H19"></path>',
+};
+const EVENT_ICONS: Readonly<Record<EventTone, string>> = {
+  ok: '<path d="M5 12.5l4.5 4.5L19 7.5"></path>',
+  danger: '<path d="M7 7l10 10M17 7L7 17"></path>',
+  muted: '<circle cx="12" cy="12" r="3.5"></circle>',
+};
+const RUN_END_LABELS: Readonly<Record<string, string>> = { completed: "Run completed", failed: "Run failed", cancelled: "Run stopped" };
 const TERMINAL_EVENT_KINDS = new Set(["completed", "failed", "cancelled"]);
 const EVENT_KINDS = new Set(["status", "output", "command_output", "approval", "command", "session", "sudo_approval", "sudo_status", "sudo_error", ...TERMINAL_EVENT_KINDS]);
 
@@ -66,6 +88,24 @@ function parseLocalChats(value: unknown): LocalChatListing {
     return { id: chat.id, title: chat.title, project_path: chat.project_path as string | null, updated_at: chat.updated_at as number | null };
   });
   return { sessions, warnings: listing.warnings as string[], truncated: listing.truncated || listing.sessions.length > MAX_VISIBLE_LOCAL_CHATS };
+}
+
+function formatRemaining(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  return `${minutes}:${String(totalSeconds % 60).padStart(2, "0")}`;
+}
+
+function escapeText(value: string): string {
+  return value.replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
+}
+
+// The backend appends "Exit status: N" to each command's output; the last one wins.
+function commandState(block: OutputBlock, active: boolean): CommandState {
+  if (!block.text) return active ? { kind: "running", label: "Running" } : { kind: "idle", label: "Command" };
+  const exit = [...block.text.matchAll(EXIT_STATUS_PATTERN)].at(-1)?.[1];
+  if (exit === undefined) return { kind: "done", label: "Ran" };
+  return exit === "0" ? { kind: "ok", label: "Ran" } : { kind: "failed", label: `Failed · exit ${exit}` };
 }
 
 function boundedChatText(value: string, maximum: number): string {
@@ -149,7 +189,12 @@ export function initAutomation(options: AutomationOptions) {
   const sudoRequestMessage = element("automation-sudo-message");
   const output = element("automation-output");
   const status = element("automation-status");
+  const approvalExpiry = document_.getElementById("automation-approval-expiry");
+  const sudoExpiry = document_.getElementById("automation-sudo-expiry");
   const bindings: Array<() => void> = [];
+  const approvalReceivedAt = new Map<string, number>();
+  let sudoConsentReceivedAt: number | null = null;
+  let countdownTimer: ReturnType<typeof setInterval> | null = null;
   let providers: Provider[] = [];
   let run: Run | null = null;
   let approvals: Approval[] = [];
@@ -167,6 +212,8 @@ export function initAutomation(options: AutomationOptions) {
   let unlisten: (() => void) | null = null;
   let outputBlocks: readonly OutputBlock[] = [];
   let outputTrimmed = false;
+  let nextBlockId = 1;
+  const collapsedBlocks = new Set<number>();
   let statusMessage = "";
   let statusError = false;
   let conversationError = "";
@@ -261,7 +308,65 @@ export function initAutomation(options: AutomationOptions) {
     sudoStatus.dataset.error = String(sudoMessageError);
     status.textContent = statusMessage || (selectedTarget ? "Describe a task. Each remote command needs your approval." : "Select a connected SSH server to begin.");
     status.dataset.error = String(statusError);
-    toggle.textContent = approval || sudoConsent ? "Automation · review" : run ? "Automation · running" : "Automation";
+    const needsReview = Boolean(run && (approval || sudoConsent));
+    toggle.textContent = needsReview ? "Approval needed" : run ? "Agent running" : "Agent idle";
+    toggle.dataset.state = needsReview ? "review" : run ? "running" : "idle";
+    syncCountdown();
+    notifyState();
+  }
+
+  function notifyState() {
+    options.onStateChange?.({
+      open: !panel.hidden,
+      running: Boolean(run),
+      review: Boolean(run && (approvals.length || sudoConsent)),
+      targetSessionId: run?.target.sessionId ?? null,
+    });
+  }
+
+  function updateCountdowns(): boolean {
+    const now = Date.now();
+    let active = false;
+    const approval = approvals[0];
+    const approvalStart = approval ? approvalReceivedAt.get(approval.requestId) : undefined;
+    if (run && approval && approvalStart !== undefined) {
+      const remaining = approvalStart + APPROVAL_TIMEOUT_MS - now;
+      if (approvalExpiry) approvalExpiry.textContent = remaining > 0 ? `Expires in ${formatRemaining(remaining)}` : "Expiring…";
+      active = remaining > 0;
+    } else if (approvalExpiry) {
+      approvalExpiry.textContent = "";
+    }
+    if (run && sudoConsent && sudoConsentReceivedAt !== null) {
+      const remaining = sudoConsentReceivedAt + SUDO_CONSENT_TIMEOUT_MS - now;
+      if (sudoExpiry) sudoExpiry.textContent = remaining > 0 ? `Expires in ${formatRemaining(remaining)}` : "Expiring…";
+      active ||= remaining > 0;
+    } else if (sudoExpiry) {
+      sudoExpiry.textContent = "";
+    }
+    return active;
+  }
+
+  function stopCountdown() {
+    if (countdownTimer === null) return;
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+  }
+
+  function syncCountdown() {
+    if (!updateCountdowns() || disposed) {
+      stopCountdown();
+      return;
+    }
+    if (countdownTimer !== null) return;
+    countdownTimer = setInterval(() => {
+      if (disposed || !updateCountdowns()) stopCountdown();
+    }, COUNTDOWN_INTERVAL_MS);
+    // Node test runs must not stay alive for an approval nobody answers.
+    (countdownTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  function providerName(id: ProviderId): string {
+    return providers.find(provider => provider.id === id)?.name ?? (id === "claude" ? "Claude Code" : "Codex");
   }
 
   function renderLocalChats(conversationId: string, target: Target | null) {
@@ -280,6 +385,9 @@ export function initAutomation(options: AutomationOptions) {
     }
     if (conversationError) chatHelp.textContent += ` ${conversationError}`;
     chatHelp.dataset.error = String(Boolean(error) || Boolean(conversationError));
+    // A bare "N saved chats" count repeats what the picker shows, so the panel can hide it.
+    chatHelp.dataset.quiet = String(Boolean(listing && !error && !loading && !conversationError && listing.sessions.length
+      && !listing.truncated && !listing.warnings.length));
     if (renderedChatProvider === provider && renderedChatListing === listing && renderedChatSelection === conversationId) return;
     renderedChatProvider = provider;
     renderedChatListing = listing;
@@ -327,12 +435,101 @@ export function initAutomation(options: AutomationOptions) {
     render();
   }
 
-  function appendOutput(message: string, format: OutputBlock["format"] = "log") {
+  function appendTask(task: string) {
+    pushOutputBlocks([...outputBlocks, { id: nextBlockId++, format: "task", text: task }], true);
+  }
+
+  function appendOutput(message: string, format: "markdown" | "log" = "log") {
     if (!message) return;
     const previous = outputBlocks.at(-1);
-    const blocks = previous?.format === format
-      ? [...outputBlocks.slice(0, -1), { format, text: previous.text + message }]
-      : [...outputBlocks, { format, text: message }];
+    const agent = format === "markdown" && run ? providerName(run.provider) : undefined;
+    const blocks = previous?.format === format && previous.agent === agent
+      ? [...outputBlocks.slice(0, -1), { ...previous, text: previous.text + message }]
+      : [...outputBlocks, { id: nextBlockId++, format, text: message, agent }];
+    pushOutputBlocks(blocks);
+  }
+
+  function appendCommand(command: string) {
+    pushOutputBlocks([...outputBlocks, { id: nextBlockId++, format: "command", text: "", command }]);
+  }
+
+  // One-line markers for decisions and run state, such as "Approved $ uptime" or "Run completed".
+  function appendEvent(text: string, tone: EventTone = "muted", command?: string) {
+    pushOutputBlocks([...outputBlocks, { id: nextBlockId++, format: "event", text, tone, command }]);
+  }
+
+  // Output belongs to the command card it answers; anything else stays a plain log block.
+  function appendCommandOutput(message: string) {
+    if (!message) return;
+    const previous = outputBlocks.filter(block => block.format === "command").at(-1);
+    if (!previous) {
+      appendOutput(message);
+      return;
+    }
+    pushOutputBlocks(outputBlocks.map(block => block.id === previous.id ? { ...block, text: block.text + message } : block));
+  }
+
+  function renderOutputBlock(block: OutputBlock, latest: boolean): HTMLElement {
+    if (block.format === "task") {
+      const node = document_.createElement("div");
+      node.className = "automation-output-task";
+      node.innerHTML = `<p class="automation-task-text"><span class="automation-sr-only">Task: </span>${escapeText(block.text)}</p>`;
+      return node;
+    }
+    if (block.format === "event") {
+      const tone = block.tone ?? "muted";
+      const node = document_.createElement("p");
+      node.className = "automation-output-event";
+      node.dataset.tone = tone;
+      node.innerHTML = `<svg class="automation-event-icon" viewBox="0 0 24 24" aria-hidden="true">${EVENT_ICONS[tone]}</svg>`
+        + `<span class="automation-event-text">${escapeText(block.text)}</span>`
+        + (block.command ? ` <code class="automation-event-code">${escapeText(block.command)}</code>` : "");
+      return node;
+    }
+    if (block.format === "command") {
+      const state = commandState(block, latest && Boolean(run));
+      const node = document_.createElement("details");
+      node.className = "automation-output-command";
+      node.dataset.state = state.kind;
+      if (!collapsedBlocks.has(block.id)) node.setAttribute("open", "");
+      node.innerHTML = `<summary class="automation-command-summary">`
+        + `<svg class="automation-command-icon" viewBox="0 0 24 24" aria-hidden="true">${COMMAND_ICONS[state.kind]}</svg>`
+        + `<span class="automation-command-label">${escapeText(state.label)}</span>`
+        + `<code class="automation-command-text"><span class="automation-command-prompt">$ </span>${escapeText(block.command ?? "")}</code>`
+        + `<svg class="automation-command-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>`
+        + `</summary>`
+        + (block.text ? `<pre class="automation-command-output">${escapeText(block.text)}</pre>` : "");
+      node.addEventListener("toggle", () => {
+        if ((node as HTMLDetailsElement).open) collapsedBlocks.delete(block.id);
+        else collapsedBlocks.add(block.id);
+      });
+      return node;
+    }
+    const node = document_.createElement(block.format === "markdown" ? "div" : "pre");
+    node.className = `automation-output-${block.format === "markdown" ? "markdown" : "log"}`;
+    if (block.format === "markdown") {
+      node.innerHTML = renderAutomationMarkdown(block.text).trimEnd();
+      if (block.agent) node.dataset.agent = block.agent;
+    } else {
+      node.textContent = block.text;
+    }
+    return node;
+  }
+
+  // The thread (output plus approval cards) is the scrolling element in the side panel.
+  function threadElement(): HTMLElement | null {
+    const parent = (output as HTMLElement).parentElement;
+    return parent && typeof parent.scrollHeight === "number" && typeof parent.clientHeight === "number" ? parent : null;
+  }
+
+  function scrollThreadToEnd() {
+    const thread = threadElement();
+    if (thread) thread.scrollTop = thread.scrollHeight;
+  }
+
+  function pushOutputBlocks(blocks: OutputBlock[], forceScroll = false) {
+    const thread = threadElement();
+    const follow = forceScroll || !thread || thread.scrollHeight - thread.scrollTop - thread.clientHeight < THREAD_FOLLOW_THRESHOLD_PX;
     const characters = blocks.reduce((total, block) => total + block.text.length, 0);
     outputTrimmed ||= characters > MAX_OUTPUT_CHARACTERS || blocks.length > MAX_OUTPUT_BLOCKS;
     let remaining = MAX_OUTPUT_CHARACTERS - (outputTrimmed ? OUTPUT_TRIM_NOTICE.length : 0);
@@ -344,13 +541,8 @@ export function initAutomation(options: AutomationOptions) {
       remaining -= text.length;
     }
     outputBlocks = retained.reverse();
-    const nodes = outputBlocks.map(block => {
-      const node = document_.createElement(block.format === "markdown" ? "div" : "pre");
-      node.className = `automation-output-${block.format === "markdown" ? "markdown" : "log"}`;
-      if (block.format === "markdown") node.innerHTML = renderAutomationMarkdown(block.text).trimEnd();
-      else node.textContent = block.text;
-      return node;
-    });
+    const latestCommand = outputBlocks.filter(block => block.format === "command").at(-1);
+    const nodes = outputBlocks.map(block => renderOutputBlock(block, block.id === latestCommand?.id));
     if (outputTrimmed) {
       const notice = document_.createElement("pre");
       notice.className = "automation-output-log";
@@ -359,11 +551,13 @@ export function initAutomation(options: AutomationOptions) {
     }
     output.replaceChildren(...nodes);
     output.scrollTop = output.scrollHeight;
+    if (thread && follow) thread.scrollTop = thread.scrollHeight;
   }
 
   function setOpen(open: boolean, focus = false) {
     panel.hidden = !open;
     toggle.setAttribute("aria-expanded", String(open));
+    notifyState();
     options.onLayoutChange();
     if (open) {
       panelOpened = true;
@@ -375,6 +569,7 @@ export function initAutomation(options: AutomationOptions) {
 
   function resetSudoConsent() {
     sudoConsent = null;
+    sudoConsentReceivedAt = null;
     sudoInFlight = null;
     sudoResolved = false;
     sudoMessage = "";
@@ -395,14 +590,16 @@ export function initAutomation(options: AutomationOptions) {
       conversationDrafts.set(key, event.message);
       try { storage?.setItem(key, JSON.stringify(event.message)); conversationError = storageAccessError; }
       catch (error) { conversationError = `Could not save this chat context: ${String(error)}. Copy the conversation ID to reuse it.`; }
-      appendOutput(`\nConversation ID: ${event.message}\n`);
+      appendEvent("Conversation ID:", "muted", event.message);
       render();
     } else if (event.kind === "sudo_approval") {
       if (run.stopping || sudoResolved || sudoConsent || seenSudoRequests.has(event.request_id!)) return;
       seenSudoRequests.add(event.request_id!);
       sudoConsent = { requestId: event.request_id!, command: event.command!, message: event.message };
+      sudoConsentReceivedAt = Date.now();
       setStatus("Sudo needs permission to use this server's saved password. Remote commands still require approval.");
       setOpen(true);
+      scrollThreadToEnd();
       sudoAllowButton.focus();
     } else if (event.kind === "sudo_status") {
       if (!sudoInFlight?.approved || event.request_id !== sudoInFlight.requestId) return;
@@ -424,26 +621,31 @@ export function initAutomation(options: AutomationOptions) {
     } else if (event.kind === "approval") {
       if (!approvals.some(approval => approval.requestId === event.request_id)) {
         approvals = [...approvals, { requestId: event.request_id!, command: event.command! }];
+        approvalReceivedAt.set(event.request_id!, Date.now());
       }
       setOpen(true);
       setStatus("Review the command for this server. The agent is waiting for your decision.");
+      scrollThreadToEnd();
     } else if (event.kind === "output") {
       appendOutput(event.message, "markdown");
     } else if (event.kind === "command_output") {
-      appendOutput(event.message);
+      appendCommandOutput(event.message);
     } else if (TERMINAL_EVENT_KINDS.has(event.kind)) {
-      appendOutput(`\n[${event.kind}] ${event.message}\n`);
+      const label = RUN_END_LABELS[event.kind];
       run = null;
+      appendEvent(event.message.trim() ? `${label}. ${event.message.trim()}` : `${label}.`, event.kind === "completed" ? "ok" : event.kind === "failed" ? "danger" : "muted");
       approvals = [];
+      approvalReceivedAt.clear();
       approvalInFlight = null;
       resetSudoConsent();
       setStatus(event.message || `Automation ${event.kind}.`, event.kind === "failed");
     } else {
       if (event.kind === "status" && event.request_id) {
         approvals = approvals.filter(approval => approval.requestId !== event.request_id);
+        approvalReceivedAt.delete(event.request_id);
         if (approvalInFlight === event.request_id) approvalInFlight = null;
       }
-      if (event.kind === "command") appendOutput(`\n$ ${event.command ?? event.message}\n`);
+      if (event.kind === "command") appendCommand(event.command ?? event.message);
       setStatus(event.message);
     }
   }
@@ -493,15 +695,17 @@ export function initAutomation(options: AutomationOptions) {
     const resumeSessionId = conversation.value.trim() || null;
     run = currentRun;
     approvals = [];
+    approvalReceivedAt.clear();
     approvalInFlight = null;
     resetSudoConsent();
     outputBlocks = [];
     outputTrimmed = false;
-    appendOutput(`${providers.find(provider => provider.id === currentRun.provider)?.name} · ${target.label}\nTask: ${prompt.value.trim()}\n\n`);
+    const task = prompt.value.trim();
+    appendTask(task);
     setStatus("Starting the local agent…");
     try {
       await options.invoke("start_ssh_automation", {
-        runId: currentRun.id, sessionId: currentRun.target.sessionId, provider: currentRun.provider, prompt: prompt.value.trim(), resumeSessionId,
+        runId: currentRun.id, sessionId: currentRun.target.sessionId, provider: currentRun.provider, prompt: task, resumeSessionId,
       });
     } catch (error) {
       if (disposed || run?.id !== currentRun.id) return;
@@ -509,7 +713,7 @@ export function initAutomation(options: AutomationOptions) {
       approvals = [];
       resetSudoConsent();
       const message = `Could not start automation: ${String(error)}`;
-      appendOutput(`\n${message}\n`);
+      appendEvent(message, "danger");
       setStatus(message, true);
     }
   }
@@ -538,7 +742,8 @@ export function initAutomation(options: AutomationOptions) {
       await options.invoke("respond_automation_approval", { runId, requestId: approval.requestId, approved });
       if (disposed || run?.id !== runId) return;
       approvals = approvals.filter(candidate => candidate.requestId !== approval.requestId);
-      appendOutput(`\n[${approved ? "Approved" : "Denied"}] ${approval.command}\n`);
+      approvalReceivedAt.delete(approval.requestId);
+      appendEvent(approved ? "Approved" : "Denied", approved ? "ok" : "danger", approval.command);
       setStatus(approvals.length ? "Review the next remote command." : approved ? "Command approved. The agent is continuing…" : "Command denied. The agent is continuing…");
     } catch (error) {
       if (!disposed && run?.id === runId) setStatus(`Could not submit command approval: ${String(error)}. Try again.`, true);
@@ -617,6 +822,11 @@ export function initAutomation(options: AutomationOptions) {
   });
   bind(newChatButton, "click", clearConversation);
   bind(prompt, "input", render);
+  bind(prompt, "keydown", event => {
+    const key = event as KeyboardEvent;
+    if (key.key !== "Enter" || !(key.ctrlKey || key.metaKey) || key.isComposing) return;
+    void startRun(key);
+  });
   bind(element("automation-form"), "submit", startRun);
   bind(output, "click", async event => {
     const anchor = (event.target as Element | null)?.closest?.("a[href]");
@@ -654,6 +864,7 @@ export function initAutomation(options: AutomationOptions) {
     refresh() { if (!disposed) render(); },
     dispose() {
       disposed = true;
+      stopCountdown();
       unlisten?.();
       bindings.forEach(unbind => unbind());
     },

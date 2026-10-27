@@ -467,8 +467,170 @@ test("SSH output, task text, commands, and approvals stay literal beside agent M
   assert.match(output.textContent, /# literal server output\n\*\*literal value\*\*/);
   assert.equal(output.querySelector("img"), null);
   assert.equal(output.children.filter(child => child.className === "automation-output-markdown").length, 2);
-  assert.equal(output.children.filter(child => child.className === "automation-output-log").length, 2);
+  assert.equal(output.children.filter(child => child.className === "automation-output-task").length, 1);
+  assert.equal(output.children.filter(child => child.className === "automation-output-command").length, 1);
+  assert.equal(output.children.filter(child => child.className === "automation-output-log").length, 0);
   assert.equal(output.querySelector("strong")?.textContent, "Finished");
+});
+
+test("command cards show running, success, and failure from the reported exit status", async () => {
+  const harness = await createHarness();
+  await harness.task();
+  await harness.start();
+  const output = harness.control("automation-output");
+  const cards = () => output.children.filter(child => child.className === "automation-output-command");
+  harness.emit("command", "Running approved remote command", { command: "systemctl status nginx" });
+  assert.equal(cards()[0].dataset.state, "running");
+  assert.equal(cards()[0].querySelector(".automation-command-label")?.textContent, "Running");
+  assert.equal(cards()[0].attributes.get("open"), "");
+  harness.emit("command_output", "active (running)\nExit status: 0\n");
+  assert.equal(cards()[0].dataset.state, "ok");
+  assert.equal(cards()[0].querySelector(".automation-command-label")?.textContent, "Ran");
+  assert.equal(cards()[0].querySelector(".automation-command-output")?.textContent, "active (running)\nExit status: 0\n");
+  harness.emit("command", "Running approved remote command", { command: "cat /etc/missing" });
+  harness.emit("command_output", "cat: /etc/missing: No such file or directory\nExit status: 1\n");
+  assert.equal(cards()[1].dataset.state, "failed");
+  assert.equal(cards()[1].querySelector(".automation-command-label")?.textContent, "Failed · exit 1");
+  harness.emit("command", "Running approved remote command", { command: "sleep 600" });
+  harness.emit("cancelled", "Stopped by the user.");
+  assert.equal(cards()[2].dataset.state, "idle");
+  assert.equal(cards()[2].querySelector(".automation-command-label")?.textContent, "Command");
+  assert.equal(cards()[2].querySelector(".automation-command-output"), null);
+});
+
+test("command output stays attached when its approval RPC resolves after command start", async () => {
+  const response = Promise.withResolvers<unknown>();
+  const harness = await createHarness({ invoke: async ({ command }) => {
+    if (command === "list_automation_providers") return PROVIDERS;
+    if (command === "respond_automation_approval") return response.promise;
+  } });
+  await harness.task();
+  await harness.start();
+  harness.emit("approval", "Review command", { request_id: "approval-1", command: "uptime" });
+  await harness.control("automation-approve").dispatch("click");
+  harness.emit("command", "Running", { command: "uptime" });
+  response.resolve(undefined);
+  await nextTurn();
+  harness.emit("output", "**Waiting for uptime.**\n\n");
+  harness.emit("command_output", "server up\n");
+  harness.emit("output", "Still waiting for the exit status.\n");
+  harness.emit("command_output", "<img src=x onerror=alert(1)>\nExit status: 0\n");
+  const output = harness.control("automation-output");
+  assert.deepEqual(output.children.map(child => child.className), [
+    "automation-output-task", "automation-output-command", "automation-output-event", "automation-output-markdown",
+  ]);
+  const card = output.children.find(child => child.className === "automation-output-command")!;
+  assert.equal(card.dataset.state, "ok");
+  assert.equal(card.querySelector(".automation-command-output")?.textContent, "server up\n<img src=x onerror=alert(1)>\nExit status: 0\n");
+  assert.equal(output.querySelector("img"), null);
+  assert.equal(output.querySelector(".automation-event-text")?.textContent, "Approved");
+  assert.match(output.children.at(-1)!.textContent, /Waiting for uptime\.[\s\S]*Still waiting for the exit status\./);
+});
+
+test("interleaved agent Markdown leaves only the latest command active and receives its exit state", async () => {
+  const harness = await createHarness();
+  await harness.task();
+  await harness.start();
+  const output = harness.control("automation-output");
+  const cards = () => output.children.filter(child => child.className === "automation-output-command");
+  harness.emit("command", "Running", { command: "uptime" });
+  harness.emit("command_output", "up\nExit status: 0\n");
+  harness.emit("command", "Running", { command: "cat /etc/missing" });
+  harness.emit("output", "Checking the file now.\n");
+  assert.equal(cards()[0].dataset.state, "ok");
+  assert.equal(cards()[1].dataset.state, "running");
+  harness.emit("command_output", "No such file\nExit status: 1\n");
+  assert.equal(cards()[0].querySelector(".automation-command-output")?.textContent, "up\nExit status: 0\n");
+  assert.equal(cards()[1].dataset.state, "failed");
+  assert.equal(cards()[1].querySelector(".automation-command-output")?.textContent, "No such file\nExit status: 1\n");
+  assert.deepEqual(output.children.map(child => child.className), [
+    "automation-output-task", "automation-output-command", "automation-output-command", "automation-output-markdown",
+  ]);
+});
+
+test("approval markers retain a running command until the run ends", async () => {
+  const response = Promise.withResolvers<unknown>();
+  const harness = await createHarness({ invoke: async ({ command }) => {
+    if (command === "list_automation_providers") return PROVIDERS;
+    if (command === "respond_automation_approval") return response.promise;
+  } });
+  await harness.task();
+  await harness.start();
+  const output = harness.control("automation-output");
+  const card = () => output.children.find(child => child.className === "automation-output-command")!;
+  harness.emit("approval", "Review command", { request_id: "approval-1", command: "sleep 1" });
+  await harness.control("automation-approve").dispatch("click");
+  harness.emit("command", "Running", { command: "sleep 1" });
+  assert.equal(card().dataset.state, "running");
+  response.resolve(undefined);
+  await nextTurn();
+  assert.equal(card().dataset.state, "running");
+  harness.emit("output", "Waiting for the command.\n");
+  assert.equal(card().dataset.state, "running");
+  harness.emit("completed", "Done");
+  assert.equal(card().dataset.state, "idle");
+});
+
+test("command output without a command card remains a literal plain log", async () => {
+  const harness = await createHarness();
+  await harness.task();
+  await harness.start();
+  const message = "**literal output** <img src=x onerror=alert(1)>\nExit status: 0\n";
+  harness.emit("command_output", message);
+  const output = harness.control("automation-output");
+  const log = output.children.find(child => child.className === "automation-output-log");
+  assert.equal(log?.textContent, message);
+  assert.equal(output.querySelector("img"), null);
+  assert.equal(output.children.some(child => child.className === "automation-output-command"), false);
+});
+
+test("approval decisions and run endings appear as single marker lines", async () => {
+  const harness = await createHarness();
+  await harness.task();
+  await harness.start();
+  harness.emit("approval", "Review", { request_id: "approval-1", command: "uptime" });
+  await harness.control("automation-approve").dispatch("click");
+  await nextTurn();
+  harness.emit("approval", "Review", { request_id: "approval-2", command: "rm -rf /tmp/cache" });
+  await harness.control("automation-deny").dispatch("click");
+  await nextTurn();
+  harness.emit("failed", "Agent exited with code 1.");
+  const events = harness.control("automation-output").children.filter(child => child.className === "automation-output-event");
+  assert.deepEqual(events.map(event => [event.dataset.tone, event.textContent]), [
+    ["ok", "Approved uptime"],
+    ["danger", "Denied rm -rf /tmp/cache"],
+    ["danger", "Run failed. Agent exited with code 1."],
+  ]);
+});
+
+test("Ctrl+Enter in the task box starts a run and plain Enter does not", async () => {
+  const harness = await createHarness();
+  await harness.task("inspect nginx");
+  const keydown = (modifiers: { ctrlKey?: boolean; metaKey?: boolean }) => {
+    const event = new Event("keydown", { cancelable: true });
+    Object.defineProperties(event, { key: { value: "Enter" }, ctrlKey: { value: Boolean(modifiers.ctrlKey) }, metaKey: { value: Boolean(modifiers.metaKey) }, isComposing: { value: false } });
+    return event;
+  };
+  await harness.control("automation-prompt").dispatch("keydown", keydown({}));
+  assert.equal(harness.calls.filter(call => call.command === "start_ssh_automation").length, 0);
+  const submit = keydown({ ctrlKey: true });
+  await harness.control("automation-prompt").dispatch("keydown", submit);
+  assert.equal(submit.defaultPrevented, true);
+  assert.equal(harness.calls.filter(call => call.command === "start_ssh_automation").length, 1);
+});
+
+test("the status bar toggle names the agent state", async () => {
+  const harness = await createHarness();
+  assert.equal(harness.control("btn-automation-toggle").textContent, "Agent idle");
+  assert.equal(harness.control("btn-automation-toggle").dataset.state, "idle");
+  await harness.task();
+  await harness.start();
+  assert.equal(harness.control("btn-automation-toggle").textContent, "Agent running");
+  assert.equal(harness.control("btn-automation-toggle").dataset.state, "running");
+  harness.emit("approval", "Review", { request_id: "approval-1", command: "uptime" });
+  assert.equal(harness.control("btn-automation-toggle").textContent, "Approval needed");
+  harness.emit("completed", "Done");
+  assert.equal(harness.control("btn-automation-toggle").textContent, "Agent idle");
 });
 
 test("safe Markdown links open through the native opener without navigating the app", async () => {
@@ -818,11 +980,14 @@ test("refresh preserves the selected chat and renders bounded metadata as litera
   } });
   await harness.control("btn-automation-toggle").dispatch("click");
   await nextTurn();
+  assert.match(harness.control("automation-chat-help").textContent, /1 saved local chat\./);
+  assert.equal(harness.control("automation-chat-help").dataset.quiet, "true");
   harness.control("automation-chat").value = CONVERSATION_ID;
   await harness.control("automation-chat").dispatch("change");
   refresh = true;
   await harness.control("automation-refresh-chats").dispatch("click");
   await nextTurn();
+  assert.equal(harness.control("automation-chat-help").dataset.quiet, "false");
   assert.equal(harness.control("automation-chat").value, CONVERSATION_ID);
   const label = harness.control("automation-chat").children.find(option => option.value === CONVERSATION_ID)!.textContent;
   assert.match(label, /^<img src=x onerror=alert\(1\)>/);
@@ -861,7 +1026,8 @@ test("sudo consent opens and focuses a prompt for the pinned server without auto
   assert.equal(harness.control("automation-sudo-command").textContent, SUDO_REQUEST.command);
   assert.equal(harness.control("automation-sudo-message").textContent, SUDO_REQUEST_MESSAGE);
   assert.equal(harness.control("automation-sudo-allow").focusCount, 1);
-  assert.equal(harness.control("btn-automation-toggle").textContent, "Automation · review");
+  assert.equal(harness.control("btn-automation-toggle").textContent, "Approval needed");
+  assert.equal(harness.control("btn-automation-toggle").dataset.state, "review");
   assert.equal(harness.calls.some(call => call.command === "respond_automation_sudo_consent"), false);
 });
 

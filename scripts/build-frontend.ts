@@ -1,8 +1,8 @@
 import { build } from "esbuild";
 
 await build({
-  entryPoints: ["src/automation.ts"],
-  outfile: "src/generated/automation.js",
+  entryPoints: ["src/automation.ts", "src/local-terminal-panel.ts", "src/command-palette.ts"],
+  outdir: "src/generated",
   bundle: true,
   format: "esm",
   platform: "browser",

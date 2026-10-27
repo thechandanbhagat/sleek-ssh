@@ -3,289 +3,402 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SleekSSH - Multi-Session SSH client</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <title>SleekSSH</title>
+    <link rel="preload" href="assets/fonts/Geist-latin-variable.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="assets/fonts/JetBrainsMono-Regular.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="icon" type="image/png" href="assets/sleekssh-icon.png" />
     <link rel="stylesheet" href="assets/xterm.css" />
     <link rel="stylesheet" href="styles.css" />
-  <link rel="stylesheet" href="terminal-interactions.css" />
-  <link rel="stylesheet" href="sudo-interactions.css" />
+    <link rel="stylesheet" href="terminal-interactions.css" />
+    <link rel="stylesheet" href="sudo-interactions.css" />
     <link rel="stylesheet" href="automation.css" />
+    <link rel="stylesheet" href="local-terminal-locations.css" />
+    <link rel="stylesheet" href="command-palette.css" />
     <script src="assets/xterm.js"></script>
     <script src="assets/addon-fit.js"></script>
     <script type="module" src="/generated/automation.js" defer></script>
+    <script type="module" src="/generated/local-terminal-panel.js" defer></script>
+    <script type="module" src="/generated/command-palette.js" defer></script>
     <script type="module" src="/main.js" defer></script>
   </head>
 
   <body>
-    <div class="titlebar" data-tauri-drag-region>
-      <div class="titlebar-title" data-tauri-drag-region>
-        <img class="titlebar-logo" src="assets/sleekssh-icon.png" alt="" />
-        <span>SleekSSH</span>
+    <header class="titlebar" data-tauri-drag-region>
+      <div class="titlebar-brand" data-tauri-drag-region>
+        <img class="titlebar-logo" src="assets/sleekssh-icon.png" alt="SleekSSH" data-tauri-drag-region />
       </div>
+      <div class="tabs-container" id="tabs-container" role="tablist" aria-label="Open workspaces" data-tauri-drag-region>
+        <!-- Workspace tabs are added here -->
+      </div>
+      <button class="titlebar-new-tab" id="btn-new-tab-plus" type="button" title="New tab (Ctrl+Shift+P)" aria-label="New tab">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+      </button>
+      <div class="titlebar-drag" data-tauri-drag-region></div>
+      <button class="command-trigger" id="btn-command-palette" type="button" aria-haspopup="dialog" aria-controls="command-palette" title="Search hosts, shells and commands (Ctrl+Shift+P)">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="M20 20l-4.2-4.2"></path></svg>
+        <span class="command-trigger-label">Search hosts, shells, commands</span>
+        <span class="kbd-group" aria-hidden="true"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd></span>
+      </button>
       <div class="titlebar-controls">
-        <button class="titlebar-btn" id="titlebar-port-killer" title="Port Killer">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10"></circle>
-            <line x1="22" y1="12" x2="18" y2="12"></line>
-            <line x1="6" y1="12" x2="2" y2="12"></line>
-            <line x1="12" y1="6" x2="12" y2="2"></line>
-            <line x1="12" y1="22" x2="12" y2="18"></line>
-          </svg>
+        <button class="titlebar-btn" id="titlebar-minimize" type="button" title="Minimize" aria-label="Minimize">
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5.5h10" stroke="currentColor" stroke-width="1"></path></svg>
         </button>
-        <button class="titlebar-btn" id="titlebar-settings" title="Settings">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="transform: translateY(1px);"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        <button class="titlebar-btn" id="titlebar-maximize" type="button" title="Maximize" aria-label="Maximize">
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"></rect></svg>
         </button>
-        <button class="titlebar-btn" id="titlebar-minimize" title="Minimize">
-          <svg width="10" height="10" viewBox="0 0 10 1"><rect x="0" y="0" width="10" height="1" fill="currentColor"/></svg>
-        </button>
-        <button class="titlebar-btn" id="titlebar-maximize" title="Maximize">
-          <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1"/></svg>
-        </button>
-        <button class="titlebar-btn close" id="titlebar-close" title="Close">
-          <svg width="10" height="10" viewBox="0 0 10 10"><polygon points="10,1 9,0 5,4 1,0 0,1 4,5 0,9 1,10 5,6 9,10 10,9 6,5" fill="currentColor"/></svg>
+        <button class="titlebar-btn close" id="titlebar-close" type="button" title="Close" aria-label="Close">
+          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M0.5 0.5l9 9M9.5 0.5l-9 9" stroke="currentColor" stroke-width="1"></path></svg>
         </button>
       </div>
-    </div>
+    </header>
+
     <div class="app-container">
-      <!-- SIDEBAR -->
-      <aside class="sidebar" id="sidebar-panel">
-        <div class="sidebar-header">
-          <div class="logo">
-            <img class="logo-icon" src="assets/sleekssh-icon.png" alt="" />
-            <span>SleekSSH</span>
-          </div>
-        </div>
+      <nav class="activity-rail" aria-label="Views">
+        <button class="nav-tab rail-button active" type="button" data-tab="connections" title="Hosts" aria-label="Hosts" aria-pressed="true" aria-controls="sidebar-panel">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"></rect><rect x="3" y="13" width="18" height="7" rx="2"></rect><path d="M7 7.5h.01M7 16.5h.01"></path></svg>
+        </button>
+        <button class="nav-tab rail-button" type="button" data-tab="terminal" title="Local shells" aria-label="Local shells" aria-pressed="false" aria-controls="sidebar-panel">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"></rect><path d="M7 9.5l3 2.5-3 2.5M12.5 15H17"></path></svg>
+        </button>
+        <button class="nav-tab rail-button" type="button" data-tab="keys" title="SSH keys" aria-label="SSH keys" aria-pressed="false" aria-controls="sidebar-panel">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"></circle><path d="M10.9 12.1L19 4M15.5 7.5l2.5 2.5M13.5 9.5l1.5 1.5"></path></svg>
+        </button>
+        <button class="nav-tab rail-button hidden" type="button" data-tab="vpn" title="VPN" aria-label="VPN" aria-pressed="false" aria-controls="sidebar-panel">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5.5c0 4.2-2.9 7.7-7 9.5-4.1-1.8-7-5.3-7-9.5V6z"></path></svg>
+          <span class="rail-badge" id="rail-vpn-badge" data-state="unknown" aria-hidden="true"></span>
+        </button>
+        <button class="rail-button" type="button" id="rail-port-killer" title="Port Killer" aria-label="Port Killer">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="1.8"></circle><path d="M8.1 8.1a5.5 5.5 0 0 0 0 7.8M15.9 8.1a5.5 5.5 0 0 1 0 7.8M5.3 5.3a9.5 9.5 0 0 0 0 13.4M18.7 5.3a9.5 9.5 0 0 1 0 13.4"></path></svg>
+        </button>
+        <span class="rail-spacer"></span>
+        <button class="rail-button" type="button" id="btn-sidebar-toggle" title="Hide sidebar" aria-label="Hide sidebar" aria-expanded="true" aria-controls="sidebar-panel">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"></rect><path d="M9 4v16"></path></svg>
+        </button>
+        <button class="rail-button" type="button" id="rail-settings" title="Settings" aria-label="Settings">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
+      </nav>
 
-        <nav class="sidebar-tabs">
-          <button class="nav-tab active" data-tab="connections">Connections</button>
-          <button class="nav-tab" data-tab="terminal">Terminal</button>
-          <button class="nav-tab hidden" data-tab="vpn">VPN</button>
-          <button class="nav-tab" data-tab="keys">Keys</button>
-        </nav>
-
+      <aside class="sidebar" id="sidebar-panel" aria-label="Sidebar">
         <div class="sidebar-content">
-          <!-- CONNECTIONS TAB -->
-          <div class="tab-pane active" id="pane-connections">
-            <div class="pane-header">
-              <h3>Saved Sessions</h3>
-              <button class="btn btn-icon btn-primary" id="btn-add-profile" title="Add Connection">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <line x1="12" y1="5" x2="12" y2="19"></line>
-                  <line x1="5" y1="12" x2="19" y2="12"></line>
-                </svg>
-              </button>
-            </div>
-            <div class="profiles-list" id="profiles-list">
-              <!-- Dynamically populated profiles -->
-              <div class="empty-state">No saved profiles. Click "+" to add.</div>
-            </div>
-          </div>
-
-          <div class="tab-pane" id="pane-terminal">
-            <div class="pane-header">
-              <h3>Local Terminal</h3>
-            </div>
-            <div class="local-terminal-section">
-              <p class="local-terminal-description">Open a shell inside SleekSSH without switching to a separate terminal window.</p>
-              <div class="local-terminal-actions" role="group" aria-label="Choose a local shell">
-                <button class="btn btn-primary btn-full local-terminal-button" id="btn-open-powershell" type="button">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                    <polyline points="4 17 10 11 4 5"></polyline>
-                    <line x1="12" y1="19" x2="20" y2="19"></line>
-                  </svg>
-                  Open PowerShell
-                </button>
-                <button class="btn btn-secondary btn-full local-terminal-button" id="btn-open-command-prompt" type="button">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                    <rect x="3" y="4" width="18" height="16" rx="2"></rect>
-                    <polyline points="7 9 10 12 7 15"></polyline>
-                    <line x1="12" y1="15" x2="17" y2="15"></line>
-                  </svg>
-                  Open Command Prompt
+          <section class="tab-pane active" id="pane-connections" aria-labelledby="pane-connections-title">
+            <header class="pane-header">
+              <h2 id="pane-connections-title">Hosts</h2>
+              <div class="pane-actions">
+                <button class="icon-button" id="btn-add-profile" type="button" title="New host" aria-label="New host">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
                 </button>
               </div>
-              <p class="helper-text">Global shortcut: Ctrl+Alt+T opens PowerShell from anywhere.</p>
+            </header>
+            <div class="pane-search">
+              <label class="sr-only" for="host-filter">Filter hosts</label>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="M20 20l-4.2-4.2"></path></svg>
+              <input id="host-filter" type="search" placeholder="Filter hosts" autocomplete="off" spellcheck="false" />
             </div>
-          </div>
-
-          <div class="tab-pane" id="pane-vpn">
-            <div class="pane-header">
-              <h3>VPN Switcher</h3>
-              <button class="btn btn-icon btn-primary" id="btn-add-vpn-profile" title="Add VPN Shortcut">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <line x1="12" y1="5" x2="12" y2="19"></line>
-                  <line x1="5" y1="12" x2="19" y2="12"></line>
-                </svg>
+            <div class="profiles-list hosts-tree" id="profiles-list">
+              <div class="empty-state">No saved hosts yet.</div>
+            </div>
+            <footer class="pane-footer">
+              <button class="quick-connect-button" id="btn-quick-connect" type="button" title="Connect without saving a host">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3L5.5 13.5H11L10 21l7.5-10.5H12z"></path></svg>
+                <span>Quick connect</span>
+                <span class="kbd-group" aria-hidden="true"><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>N</kbd></span>
               </button>
-            </div>
+            </footer>
+          </section>
 
-            <div class="vpn-status-card">
-              <div class="vpn-status-header">
-                <span id="vpn-client-path">Detecting vpncli.exe...</span>
-                <button class="btn btn-secondary btn-small" id="btn-refresh-vpn-status">Refresh</button>
+          <section class="tab-pane" id="pane-terminal" aria-labelledby="pane-terminal-title">
+            <header class="pane-header">
+              <h2 id="pane-terminal-title">Local shells</h2>
+            </header>
+            <div class="pane-body local-terminal-section">
+              <div class="shell-list" role="group" aria-label="Choose a local shell">
+                <button class="shell-row local-terminal-button" id="btn-open-powershell" type="button">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"></rect><path d="M7 9.5l3 2.5-3 2.5M12.5 15H17"></path></svg>
+                  <span class="shell-row-label">PowerShell</span>
+                  <span class="kbd-group" aria-hidden="true"><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>T</kbd></span>
+                </button>
+                <button class="shell-row local-terminal-button" id="btn-open-command-prompt" type="button">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"></rect><path d="M7 9l3 3-3 3M12.5 15H17"></path></svg>
+                  <span class="shell-row-label">Command Prompt</span>
+                </button>
               </div>
-              <div class="vpn-connection-state is-unknown" id="vpn-connection-state" role="status" aria-live="polite">
-                <span class="vpn-connection-state-indicator" aria-hidden="true"></span>
-                <span id="vpn-connection-summary">VPN status not loaded.</span>
+              <p class="helper-text">Ctrl+Alt+T opens PowerShell from anywhere while SleekSSH is running.</p>
+              <section class="local-locations" id="local-locations" aria-labelledby="local-locations-title">
+                <h3 class="section-label" id="local-locations-title">Saved locations</h3>
+                <p class="helper-text" id="local-locations-empty">Save a folder to open PowerShell there in one click.</p>
+                <ul class="local-locations-list" id="local-locations-list" aria-label="Saved PowerShell locations"></ul>
+                <p class="local-location-error" id="local-location-error" role="alert" hidden></p>
+                <details id="local-location-editor">
+                  <summary id="local-location-editor-toggle">Add location</summary>
+                  <form class="local-location-form" id="local-location-form">
+                    <label for="local-location-path">Folder</label>
+                    <input id="local-location-path" type="text" placeholder="C:\Projects\my-project" required autocomplete="off" spellcheck="false" />
+                    <button class="btn btn-secondary" id="local-location-browse" type="button">Browse folders</button>
+                    <label for="local-location-name">Name (optional)</label>
+                    <input id="local-location-name" type="text" placeholder="My project" autocomplete="off" />
+                    <div class="local-location-actions">
+                      <button class="btn btn-primary" id="local-location-save" type="submit">Save location</button>
+                      <button class="btn btn-secondary" id="local-location-cancel" type="button">Cancel</button>
+                    </div>
+                  </form>
+                </details>
+              </section>
+            </div>
+          </section>
+
+          <section class="tab-pane" id="pane-vpn" aria-labelledby="pane-vpn-title">
+            <header class="pane-header">
+              <h2 id="pane-vpn-title">VPN</h2>
+              <div class="pane-actions">
+                <button class="icon-button" id="btn-add-vpn-profile" type="button" title="New VPN shortcut" aria-label="New VPN shortcut">
+                  <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+                </button>
               </div>
-              <pre id="vpn-status-output">VPN status not loaded.</pre>
-              <button class="btn btn-secondary btn-full btn-small" id="btn-disconnect-vpn" disabled>Disconnect Current VPN</button>
-              <button class="btn btn-secondary btn-full btn-small hidden" id="btn-cancel-vpn-operation">Cancel Request</button>
-            </div>
+            </header>
+            <div class="pane-body">
+              <div class="vpn-status-card">
+                <div class="vpn-connection-state is-unknown" id="vpn-connection-state" role="status" aria-live="polite">
+                  <span class="vpn-connection-state-indicator" aria-hidden="true"></span>
+                  <span id="vpn-connection-summary">VPN status not loaded.</span>
+                </div>
+                <div class="vpn-status-header">
+                  <span id="vpn-client-path">Detecting vpncli.exe...</span>
+                  <button class="btn btn-secondary btn-small" id="btn-refresh-vpn-status" type="button">Refresh</button>
+                </div>
+                <pre id="vpn-status-output">VPN status not loaded.</pre>
+                <button class="btn btn-secondary btn-full btn-small" id="btn-disconnect-vpn" type="button" disabled>Disconnect current VPN</button>
+                <button class="btn btn-secondary btn-full btn-small hidden" id="btn-cancel-vpn-operation" type="button">Cancel request</button>
+              </div>
 
-            <div class="vpn-section">
-              <h4>Saved VPN Shortcuts</h4>
-              <div class="profiles-list" id="vpn-profiles-list">
-                <div class="empty-state">No VPN shortcuts saved. Click "+" to add one.</div>
+              <div class="vpn-section">
+                <h3 class="section-label">Saved shortcuts</h3>
+                <div class="profiles-list" id="vpn-profiles-list">
+                  <div class="empty-state">No VPN shortcuts saved. Use + to add one.</div>
+                </div>
+              </div>
+
+              <div class="vpn-section">
+                <div class="vpn-section-header">
+                  <h3 class="section-label">Cisco profile groups</h3>
+                  <button class="btn btn-secondary btn-small" id="btn-scan-cisco-vpn-profiles" type="button">Scan</button>
+                </div>
+                <div class="list-container vpn-import-list" id="cisco-vpn-profiles-list">
+                  <div class="small-text">Scan Cisco profiles to import server and group shortcuts.</div>
+                </div>
               </div>
             </div>
+          </section>
 
-            <div class="vpn-section">
-              <div class="vpn-section-header">
-                <h4>Cisco Profile Groups</h4>
-                <button class="btn btn-secondary btn-small" id="btn-scan-cisco-vpn-profiles">Scan</button>
+          <section class="tab-pane" id="pane-keys" aria-labelledby="pane-keys-title">
+            <header class="pane-header">
+              <h2 id="pane-keys-title">SSH keys</h2>
+            </header>
+            <div class="pane-body">
+              <div class="keys-section">
+                <h3 class="section-label">Keys in ~/.ssh</h3>
+                <div id="system-keys-list" class="key-list">
+                  <div class="small-text">Scanning ~/.ssh ...</div>
+                </div>
               </div>
-              <div class="list-container vpn-import-list" id="cisco-vpn-profiles-list">
-                <div class="small-text">Scan Cisco profiles to import server and group shortcuts.</div>
-              </div>
-            </div>
-          </div>
-
-          <!-- KEYS TAB -->
-          <div class="tab-pane" id="pane-keys">
-            <div class="pane-header">
-              <h3>SSH Keys</h3>
-            </div>
-            
-            <div class="keys-section">
-              <h4>System SSH Keys</h4>
-              <div id="system-keys-list" class="list-container">
-                <!-- List of existing key paths -->
-                <div class="small-text">Scanning ~/.ssh ...</div>
+              <button class="btn btn-secondary btn-full" id="btn-generate-key" type="button">Generate Ed25519 key</button>
+              <div class="keys-section key-display-section hidden" id="key-display-section">
+                <h3 class="section-label">New public key (id_ed25519.pub)</h3>
+                <textarea id="pubkey-text" readonly aria-label="New public key"></textarea>
+                <button class="btn btn-secondary btn-full btn-small" id="btn-copy-pubkey" type="button">Copy key to clipboard</button>
+                <p class="helper-text">Add this key to <code>~/.ssh/authorized_keys</code> on the server to log in with it.</p>
               </div>
             </div>
-
-            <div class="keys-section">
-              <h4>Actions</h4>
-              <button class="btn btn-secondary btn-full" id="btn-generate-key">
-                Generate Ed25519 Key
-              </button>
-            </div>
-
-            <div class="keys-section key-display-section hidden" id="key-display-section">
-              <h4>New Public Key (id_ed25519.pub)</h4>
-              <textarea id="pubkey-text" readonly></textarea>
-              <button class="btn btn-secondary btn-full btn-small" id="btn-copy-pubkey">
-                Copy Key to Clipboard
-              </button>
-              <p class="helper-text">Add this key to your remote server's <code>~/.ssh/authorized_keys</code> file to log in.</p>
-            </div>
-          </div>
-
+          </section>
         </div>
       </aside>
       <div id="sidebar-resize-handle" class="panel-resize-handle sidebar-resize-handle" role="separator" tabindex="0" aria-label="Resize sidebar" aria-orientation="vertical" aria-controls="sidebar-panel"></div>
 
-      <!-- MAIN WORKSPACE -->
       <main class="main-workspace">
-        <!-- TAB BAR -->
-        <header class="tab-bar">
-          <button class="panel-toggle-button" id="btn-sidebar-toggle" type="button" aria-label="Hide sidebar" aria-expanded="true" aria-controls="sidebar-panel" title="Hide sidebar">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><line x1="9" y1="4" x2="9" y2="20"></line></svg>
-          </button>
-          <div class="tabs-container" id="tabs-container" role="tablist" aria-label="Open workspaces">
-            <!-- Dynamically populated terminal tabs -->
-          </div>
-          <button class="btn-new-tab" id="btn-new-tab-plus" title="Quick Connect (Ctrl+Alt+N)" aria-label="Quick Connect">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="12" y1="5" x2="12" y2="19"></line>
-              <line x1="5" y1="12" x2="19" y2="12"></line>
-            </svg>
-          </button>
-          <button class="btn btn-secondary automation-toggle" id="btn-automation-toggle" type="button" aria-expanded="false" aria-controls="automation-panel">Automation</button>
-        </header>
-
-        <!-- TERMINAL WORKSPACES -->
         <div class="workspace-viewport" id="workspace-viewport">
           <div class="welcome-screen" id="welcome-screen">
             <div class="welcome-content">
               <img class="welcome-logo" src="assets/sleekssh-icon.png" alt="" />
-              <h2>Welcome to SleekSSH</h2>
-              <p>A secure, multi-session SSH terminal utility.</p>
+              <h1>SleekSSH</h1>
+              <p>Connect to a saved host, open a local shell, or press <span class="kbd-group"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd></span> to search everything.</p>
               <div class="welcome-actions">
-                <button class="btn btn-secondary" id="welcome-btn-terminal">Open Local Terminal</button>
-                <button class="btn btn-primary" id="welcome-btn-new">Quick Connect</button>
-                <button class="btn btn-secondary" id="welcome-btn-add">Add Connection Profile</button>
+                <button class="btn btn-primary" id="welcome-btn-new" type="button">Quick connect</button>
+                <button class="btn btn-secondary" id="welcome-btn-add" type="button">New host</button>
+                <button class="btn btn-secondary" id="welcome-btn-terminal" type="button">Open PowerShell</button>
               </div>
             </div>
           </div>
-          <!-- Terminal viewports are dynamically injected here -->
+          <!-- Session containers are added here -->
         </div>
-        <section class="automation-panel" id="automation-panel" aria-labelledby="automation-title" hidden>
-          <header class="automation-header">
-            <div><h2 id="automation-title">SSH automation</h2><p id="automation-target">Select a connected SSH server.</p></div>
-            <button class="btn btn-secondary" id="automation-close" type="button" aria-label="Hide SSH automation">Hide</button>
+
+        <section class="automation-panel side-panel" id="automation-panel" aria-labelledby="automation-title" hidden>
+          <header class="side-panel-header">
+            <div class="side-panel-tabs" role="group" aria-label="Side panel">
+              <button class="side-panel-tab" id="automation-files-tab" type="button" aria-pressed="false" title="Show files for this server">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"></path></svg>
+                <span>Files</span>
+              </button>
+              <span class="side-panel-tab is-active" aria-current="true">
+                <svg class="icon icon-agent" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9-1.9 5.1-1.9-5.1L5 10.5l5.1-1.9z"></path><path d="M18.5 16.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"></path></svg>
+                <span id="automation-title">Agent</span>
+                <span class="attention-dot" id="automation-attention" hidden></span>
+              </span>
+            </div>
+            <details class="menu" id="automation-menu">
+              <summary class="icon-button" title="More agent options" aria-label="More agent options">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="1.2" fill="currentColor"></circle><circle cx="12" cy="12" r="1.2" fill="currentColor"></circle><circle cx="18" cy="12" r="1.2" fill="currentColor"></circle></svg>
+              </summary>
+              <div class="menu-popover">
+                <button class="menu-item" id="automation-refresh" type="button">Refresh local agents</button>
+                <button class="menu-item" id="automation-refresh-chats" type="button">Refresh saved chats</button>
+                <div class="menu-separator" role="separator"></div>
+                <div class="menu-field" id="automation-manual-chat">
+                  <label for="automation-conversation">Conversation ID (optional)</label>
+                  <input id="automation-conversation" type="text" maxlength="36" autocomplete="off" spellcheck="false" aria-describedby="automation-conversation-help" placeholder="Paste an existing chat UUID" />
+                  <p id="automation-conversation-help">Use a saved, idle chat; leave blank to start one.</p>
+                </div>
+              </div>
+            </details>
+            <button class="icon-button" id="automation-close" type="button" title="Hide agent" aria-label="Hide agent">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"></path></svg>
+            </button>
           </header>
-          <div class="automation-body">
-            <form class="automation-form" id="automation-form">
-              <div class="automation-provider-field">
-                <label for="automation-provider">Local agent</label>
-                <div class="automation-provider-controls"><select id="automation-provider" aria-describedby="automation-provider-help"><option value="claude">Claude Code</option><option value="codex">Codex</option></select><button class="btn btn-secondary" id="automation-refresh" type="button">Refresh</button></div>
-                <p id="automation-provider-help">Checking local agents…</p>
+
+          <div class="automation-context">
+            <div class="automation-pickers">
+              <div class="select-field select-field-agent">
+                <label class="sr-only" for="automation-provider">Local agent</label>
+                <svg class="icon select-field-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9-1.9 5.1-1.9-5.1L5 10.5l5.1-1.9z"></path></svg>
+                <select id="automation-provider" aria-describedby="automation-provider-help"><option value="claude">Claude Code</option><option value="codex">Codex</option></select>
+                <svg class="icon select-field-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>
               </div>
-              <div class="automation-conversation-field">
-                <label for="automation-chat">Local chat</label>
-                <div class="automation-provider-controls"><select id="automation-chat" aria-describedby="automation-chat-help automation-conversation-help"><option value="">New chat</option></select><button class="btn btn-secondary" id="automation-refresh-chats" type="button">Refresh chats</button></div>
-                <p id="automation-chat-help" role="status" aria-live="polite">Saved chats load when you open automation.</p>
-                <details id="automation-manual-chat"><summary>Advanced: conversation ID</summary><div class="automation-manual-controls"><label for="automation-conversation">Conversation ID (optional)</label><div class="automation-provider-controls"><input id="automation-conversation" type="text" maxlength="36" autocomplete="off" spellcheck="false" aria-describedby="automation-conversation-help" placeholder="Paste an existing chat UUID" /><button class="btn btn-secondary" id="automation-new-chat" type="button" title="Start a new chat for this server; keeps existing CLI history">New chat</button></div><p id="automation-conversation-help">Use a saved, idle chat; leave blank to start one.</p></div></details>
+              <div class="select-field select-field-chat">
+                <label class="sr-only" for="automation-chat">Local chat</label>
+                <select id="automation-chat" aria-describedby="automation-chat-help automation-conversation-help"><option value="">New chat</option></select>
+                <svg class="icon select-field-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>
               </div>
-              <label for="automation-prompt">Task for the selected server</label>
-              <textarea id="automation-prompt" rows="3" maxlength="16000" placeholder="Inspect why nginx is failing and propose a fix." required></textarea>
-              <div class="automation-actions"><button class="btn btn-primary" id="automation-start" type="submit" disabled>Run task</button><button class="btn btn-secondary" id="automation-stop" type="button" disabled>Stop</button></div>
-              <p class="automation-guidance" id="automation-stop-help" hidden>Stop closes the agent and its command channel. Detached remote processes may continue.</p>
-            </form>
-            <div class="automation-results">
-              <p class="automation-status" id="automation-status" role="status" aria-live="polite">Select a connected SSH server to begin.</p>
-              <p class="automation-status automation-sudo-status" id="automation-sudo-status" role="status" aria-live="polite" hidden></p>
-              <div class="automation-approval" id="automation-sudo-approval" role="region" aria-labelledby="automation-sudo-title" hidden>
+              <button class="icon-button icon-button-bordered" id="automation-new-chat" type="button" title="New chat for this server (keeps CLI history)" aria-label="New chat">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+              </button>
+            </div>
+            <p class="automation-target-line">
+              <svg class="icon icon-target" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="2"></rect><rect x="3" y="13" width="18" height="7" rx="2"></rect></svg>
+              <svg class="icon icon-lock" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9.5" rx="2"></rect><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"></path></svg>
+              <span id="automation-target">Select a connected SSH server.</span>
+            </p>
+            <p class="automation-help" id="automation-provider-help">Checking local agents…</p>
+            <p class="automation-help" id="automation-chat-help" role="status" aria-live="polite">Saved chats load when you open the agent.</p>
+          </div>
+
+          <div class="automation-thread">
+            <div class="automation-output" id="automation-output" role="region" tabindex="0" aria-label="Agent conversation">
+              <p class="automation-empty">Describe a task below. The agent proposes remote commands, and nothing runs until you approve it.</p>
+            </div>
+            <p class="automation-sudo-status" id="automation-sudo-status" role="status" aria-live="polite" hidden></p>
+            <div class="automation-approval" id="automation-sudo-approval" role="region" aria-labelledby="automation-sudo-title" hidden>
+              <div class="approval-header">
+                <span class="approval-dot" aria-hidden="true"></span>
                 <strong id="automation-sudo-title">Use saved sudo password for this run?</strong>
-                <p id="automation-sudo-target"></p>
-                <p id="automation-sudo-message"></p>
-                <pre id="automation-sudo-command" tabindex="0"></pre>
-                <p class="automation-guidance">SleekSSH supplies the saved password to sudo on this server for this run. Claude/Codex never receives it. Each remote command still needs your approval.</p>
-                <div class="automation-actions"><button class="btn btn-primary" id="automation-sudo-allow" type="button">Allow for this run</button><button class="btn btn-secondary" id="automation-sudo-deny" type="button">Deny</button></div>
+                <span class="approval-expiry" id="automation-sudo-expiry"></span>
               </div>
-              <div class="automation-approval" id="automation-approval" role="region" aria-label="Remote command approval" hidden>
-                <strong>Approve this remote command</strong>
-                <p id="automation-approval-target"></p>
-                <pre id="automation-command" tabindex="0"></pre>
-                <div class="automation-actions"><button class="btn btn-primary" id="automation-approve" type="button">Approve once</button><button class="btn btn-secondary" id="automation-deny" type="button">Deny</button></div>
+              <p class="approval-target" id="automation-sudo-target"></p>
+              <p id="automation-sudo-message"></p>
+              <pre id="automation-sudo-command" tabindex="0"></pre>
+              <p class="automation-guidance">SleekSSH supplies the saved password to sudo on this server for this run. Claude Code and Codex never receive it. Each remote command still needs your approval.</p>
+              <div class="automation-actions">
+                <button class="btn btn-primary" id="automation-sudo-allow" type="button">Allow for this run</button>
+                <button class="btn btn-secondary" id="automation-sudo-deny" type="button">Deny</button>
               </div>
-              <div class="automation-output" id="automation-output" role="region" tabindex="0" aria-label="Automation output">Agent output will appear here.</div>
+            </div>
+            <div class="automation-approval" id="automation-approval" role="region" aria-labelledby="automation-approval-title" hidden>
+              <div class="approval-header">
+                <span class="approval-dot" aria-hidden="true"></span>
+                <strong id="automation-approval-title">Approve this command?</strong>
+                <span class="approval-expiry" id="automation-approval-expiry"></span>
+              </div>
+              <p class="approval-target"><span>Runs on</span> <span id="automation-approval-target"></span></p>
+              <pre id="automation-command" tabindex="0"></pre>
+              <div class="automation-actions">
+                <button class="btn btn-primary" id="automation-approve" type="button">Approve once</button>
+                <button class="btn btn-secondary" id="automation-deny" type="button">Deny</button>
+              </div>
             </div>
           </div>
+
+          <form class="automation-composer" id="automation-form">
+            <p class="automation-status" id="automation-status" role="status" aria-live="polite">Select a connected SSH server to begin.</p>
+            <label class="sr-only" for="automation-prompt">Task for the selected server</label>
+            <div class="composer-box">
+              <textarea id="automation-prompt" rows="3" maxlength="16000" placeholder="Describe a task, like: inspect why nginx is failing and propose a fix" required></textarea>
+              <div class="composer-actions">
+                <span class="composer-hint"><span class="kbd-group" aria-hidden="true"><kbd>Ctrl</kbd><kbd>Enter</kbd></span> to run</span>
+                <button class="btn btn-danger-outline btn-small" id="automation-stop" type="button" disabled>Stop</button>
+                <button class="btn btn-primary btn-small" id="automation-start" type="submit" disabled>Run task</button>
+              </div>
+            </div>
+            <p class="automation-guidance" id="automation-stop-help" hidden>Stop ends the agent and closes its command channel. Detached remote processes may continue.</p>
+          </form>
         </section>
       </main>
+    </div>
+
+    <footer class="statusbar" id="statusbar">
+      <span class="status-item" id="status-connection">
+        <span class="status-dot" id="status-connection-dot" data-state="none" aria-hidden="true"></span>
+        <span id="status-connection-label">No session</span>
+        <span class="status-detail" id="status-connection-detail"></span>
+      </span>
+      <button class="status-item status-button hidden" id="status-vpn" type="button" title="Open VPN">
+        <svg class="status-vpn-icon" id="status-vpn-dot" data-state="unknown" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5.5c0 4.2-2.9 7.7-7 9.5-4.1-1.8-7-5.3-7-9.5V6z"></path></svg>
+        <span id="status-vpn-label">VPN</span>
+      </button>
+      <span class="statusbar-spacer"></span>
+      <button class="status-item status-button automation-toggle" id="btn-automation-toggle" type="button" aria-expanded="false" aria-controls="automation-panel" data-state="idle">Agent</button>
+      <button class="status-item status-button" id="status-palette" type="button" aria-haspopup="dialog" aria-controls="command-palette">
+        <span class="kbd-group" aria-hidden="true"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd></span>
+        <span>Commands</span>
+      </button>
+    </footer>
+
+    <div class="palette-overlay" id="command-palette" hidden>
+      <div class="palette" role="dialog" aria-modal="true" aria-labelledby="palette-input-label">
+        <div class="palette-input-row">
+          <svg class="icon palette-search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="M20 20l-4.2-4.2"></path></svg>
+          <label class="sr-only" for="palette-input" id="palette-input-label">Search hosts, shells and commands</label>
+          <input id="palette-input" type="text" role="combobox" aria-expanded="true" aria-controls="palette-results" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Search hosts, shells and commands, or type user@host" />
+          <kbd class="palette-escape" aria-hidden="true">Esc</kbd>
+        </div>
+        <div class="palette-results" id="palette-results" role="listbox" aria-label="Results"></div>
+        <div class="palette-note" id="palette-note" role="note" hidden>
+          <svg class="palette-note-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5.5c0 4.2-2.9 7.7-7 9.5-4.1-1.8-7-5.3-7-9.5V6z"></path></svg>
+          <span class="palette-note-text"></span>
+        </div>
+        <div class="palette-footer">
+          <span class="palette-hint"><span class="kbd-group" aria-hidden="true"><kbd>↑</kbd><kbd>↓</kbd></span>Move</span>
+          <span class="palette-hint"><span class="kbd-group" aria-hidden="true"><kbd>Enter</kbd></span>Open</span>
+          <span class="palette-hint" id="palette-hint-modifier"><span class="kbd-group" aria-hidden="true"><kbd>Ctrl</kbd><kbd>Enter</kbd></span>Another session</span>
+          <span class="palette-hint palette-hint-end" id="palette-footer-note">Type user@host to quick connect</span>
+        </div>
+      </div>
     </div>
 
     <div class="modal-overlay hidden" id="quick-connect-modal" role="dialog" aria-modal="true" aria-labelledby="quick-connect-modal-title">
       <div class="modal-card quick-connect-modal-card">
         <div class="modal-header">
-          <h3 id="quick-connect-modal-title">Quick Connect</h3>
-          <button class="btn-close" id="btn-close-quick-connect-modal" type="button" aria-label="Close Quick Connect">&times;</button>
+          <h3 id="quick-connect-modal-title">Quick connect</h3>
+          <button class="btn-close" id="btn-close-quick-connect-modal" type="button" aria-label="Close quick connect">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"></path></svg>
+          </button>
         </div>
         <form id="quick-connect-form" class="connect-form">
           <p class="quick-connect-description">Connect without saving this server.</p>
           <div class="form-group">
-            <label for="qc-name">Session Name</label>
-            <input type="text" id="qc-name" placeholder="My Server" value="Quick Session" required />
+            <label for="qc-name">Session name</label>
+            <input type="text" id="qc-name" placeholder="My server" value="Quick Session" required />
           </div>
           <div class="form-row">
             <div class="form-group flex-3">
-              <label for="qc-host">Host / IP</label>
+              <label for="qc-host">Host or IP</label>
               <input type="text" id="qc-host" placeholder="192.168.1.50" required />
             </div>
             <div class="form-group flex-1">
@@ -297,26 +410,26 @@
             <label for="qc-username">Username</label>
             <input type="text" id="qc-username" placeholder="root" required />
           </div>
-          <div class="form-group">
-            <span class="form-label">Authentication Mode</span>
+          <fieldset class="form-group">
+            <legend class="form-label">Authentication</legend>
             <div class="radio-group">
               <label class="radio-label">
-                <input type="radio" name="qc-auth-mode" value="key" checked /> Key
+                <input type="radio" name="qc-auth-mode" value="key" checked /> Key file
               </label>
               <label class="radio-label">
                 <input type="radio" name="qc-auth-mode" value="password" /> Password
               </label>
             </div>
-          </div>
+          </fieldset>
           <div id="qc-auth-key-fields" class="auth-fields">
             <div class="form-group">
-              <label for="qc-keypath">Private Key Path</label>
+              <label for="qc-keypath">Private key path</label>
               <div class="file-input-wrapper">
                 <input type="text" id="qc-keypath" placeholder="C:\Users\...\.ssh\id_ed25519" />
               </div>
             </div>
             <div class="form-group">
-              <label for="qc-passphrase">Key Passphrase (Optional)</label>
+              <label for="qc-passphrase">Key passphrase (optional)</label>
               <input type="password" id="qc-passphrase" placeholder="Key passphrase if any" />
             </div>
           </div>
@@ -334,40 +447,42 @@
       </div>
     </div>
 
-    <!-- ADD/EDIT CONNECTION PROFILE MODAL -->
-    <div class="modal-overlay hidden" id="profile-modal">
+    <!-- ADD/EDIT HOST MODAL -->
+    <div class="modal-overlay hidden" id="profile-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <div class="modal-card">
         <div class="modal-header">
-          <h3 id="modal-title">New Connection Profile</h3>
-          <button class="btn-close" id="btn-close-modal">&times;</button>
+          <h3 id="modal-title">New host</h3>
+          <button class="btn-close" id="btn-close-modal" type="button" aria-label="Close">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"></path></svg>
+          </button>
         </div>
         <form id="profile-form">
           <input type="hidden" id="prof-id" />
           <div class="form-group">
-            <label>Profile Name</label>
-            <input type="text" id="prof-name" placeholder="My Linux Server" required />
+            <label for="prof-name">Name</label>
+            <input type="text" id="prof-name" placeholder="My Linux server" required />
           </div>
           <div class="form-group">
-            <label>Group / Namespace (Optional)</label>
+            <label for="prof-namespace">Folder (optional)</label>
             <input type="text" id="prof-namespace" placeholder="e.g. Production/Europe" />
           </div>
           <div class="form-row">
             <div class="form-group flex-3">
-              <label>Host / IP Address</label>
+              <label for="prof-host">Host or IP address</label>
               <input type="text" id="prof-host" placeholder="192.168.1.100" required />
             </div>
             <div class="form-group flex-1">
-              <label>Port</label>
+              <label for="prof-port">Port</label>
               <input type="number" id="prof-port" value="22" required />
             </div>
           </div>
           <div class="form-group">
-            <label>Username</label>
+            <label for="prof-username">Username</label>
             <input type="text" id="prof-username" placeholder="ubuntu" required />
           </div>
-          
-          <div class="form-group">
-            <label>Authentication Mode</label>
+
+          <fieldset class="form-group">
+            <legend class="form-label">Authentication</legend>
             <div class="radio-group">
               <label class="radio-label">
                 <input type="radio" name="prof-auth-mode" value="key" checked /> Key file
@@ -376,19 +491,19 @@
                 <input type="radio" name="prof-auth-mode" value="password" /> Password
               </label>
             </div>
-          </div>
+          </fieldset>
 
           <!-- KEY AUTH FIELDS -->
           <div id="prof-auth-key-fields" class="auth-fields">
             <div class="form-group">
-              <label>Private Key Path</label>
+              <label for="prof-keypath">Private key path</label>
               <div class="file-input-wrapper">
                 <input type="text" id="prof-keypath" placeholder="C:\Users\...\.ssh\id_ed25519" />
                 <button type="button" class="btn btn-secondary btn-small" id="btn-select-keyfile">Browse</button>
               </div>
             </div>
             <div class="form-group">
-              <label>Key Passphrase (Optional)</label>
+              <label for="prof-passphrase">Key passphrase (optional)</label>
               <input type="password" id="prof-passphrase" placeholder="Private key passphrase if encrypted" />
             </div>
           </div>
@@ -396,7 +511,7 @@
           <!-- PASSWORD AUTH FIELDS -->
           <div id="prof-auth-password-fields" class="auth-fields hidden">
             <div class="form-group">
-              <label>Password</label>
+              <label for="prof-password">Password</label>
               <input type="password" id="prof-password" placeholder="Password for authentication" />
             </div>
           </div>
@@ -423,62 +538,66 @@
 
           <div class="modal-footer">
             <button type="button" class="btn btn-secondary" id="btn-cancel-modal">Cancel</button>
-            <button type="submit" class="btn btn-primary" id="btn-save-profile">Save Profile</button>
+            <button type="submit" class="btn btn-primary" id="btn-save-profile">Save host</button>
           </div>
         </form>
       </div>
     </div>
 
-    <div class="modal-overlay hidden" id="vpn-profile-modal">
+    <div class="modal-overlay hidden" id="vpn-profile-modal" role="dialog" aria-modal="true" aria-labelledby="vpn-modal-title">
       <div class="modal-card">
         <div class="modal-header">
-          <h3 id="vpn-modal-title">New VPN Shortcut</h3>
-          <button class="btn-close" id="btn-close-vpn-modal">&times;</button>
+          <h3 id="vpn-modal-title">New VPN shortcut</h3>
+          <button class="btn-close" id="btn-close-vpn-modal" type="button" aria-label="Close">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"></path></svg>
+          </button>
         </div>
         <form id="vpn-profile-form">
           <input type="hidden" id="vpn-id" />
           <div class="form-group">
-            <label>Shortcut Name</label>
+            <label for="vpn-name">Shortcut name</label>
             <input type="text" id="vpn-name" placeholder="Corporate VPN" required />
           </div>
           <div class="form-group">
-            <label>Server / Alias</label>
+            <label for="vpn-server">Server or alias</label>
             <input type="text" id="vpn-server" placeholder="vpn.example.com" required />
           </div>
           <div class="form-group">
-            <label>Group (Optional)</label>
+            <label for="vpn-group">Group (optional)</label>
             <input type="text" id="vpn-group" placeholder="Employees" />
           </div>
           <div class="form-group">
-            <label>Username (Optional)</label>
+            <label for="vpn-username">Username (optional)</label>
             <input type="text" id="vpn-username" placeholder="Chandan.Bhagat" autocomplete="username" />
           </div>
           <div class="form-group">
-            <label>Password (Optional)</label>
+            <label for="vpn-password">Password (optional)</label>
             <input type="password" id="vpn-password" placeholder="VPN password" autocomplete="current-password" />
           </div>
           <p class="helper-text">Saved VPN credentials are encrypted with Windows DPAPI.</p>
           <div class="modal-footer">
             <button type="button" class="btn btn-secondary" id="btn-cancel-vpn-modal">Cancel</button>
-            <button type="submit" class="btn btn-primary" id="btn-save-vpn-profile">Save Shortcut</button>
+            <button type="submit" class="btn btn-primary" id="btn-save-vpn-profile">Save shortcut</button>
           </div>
         </form>
       </div>
     </div>
 
-    <div class="modal-overlay hidden" id="vpn-credential-modal">
+    <div class="modal-overlay hidden" id="vpn-credential-modal" role="dialog" aria-modal="true" aria-labelledby="vpn-credential-title">
       <div class="modal-card">
         <div class="modal-header">
-          <h3 id="vpn-credential-title">VPN Credentials</h3>
-          <button class="btn-close" id="btn-close-vpn-credential-modal">&times;</button>
+          <h3 id="vpn-credential-title">VPN credentials</h3>
+          <button class="btn-close" id="btn-close-vpn-credential-modal" type="button" aria-label="Close">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"></path></svg>
+          </button>
         </div>
         <form id="vpn-credential-form">
           <div class="form-group">
-            <label>Username</label>
+            <label for="vpn-runtime-username">Username</label>
             <input type="text" id="vpn-runtime-username" autocomplete="username" required />
           </div>
           <div class="form-group">
-            <label>Password</label>
+            <label for="vpn-runtime-password">Password</label>
             <input type="password" id="vpn-runtime-password" autocomplete="current-password" required />
           </div>
           <div class="modal-footer">
@@ -492,8 +611,10 @@
     <div class="modal-overlay hidden" id="vpn-certificate-modal" role="dialog" aria-modal="true" aria-labelledby="vpn-certificate-title" aria-describedby="vpn-certificate-description">
       <div class="modal-card">
         <div class="modal-header">
-          <h3 id="vpn-certificate-title">VPN Certificate Warning</h3>
-          <button class="btn-close" id="btn-close-vpn-certificate-modal" type="button" aria-label="Close VPN Certificate Warning">&times;</button>
+          <h3 id="vpn-certificate-title">VPN certificate warning</h3>
+          <button class="btn-close" id="btn-close-vpn-certificate-modal" type="button" aria-label="Close VPN certificate warning">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"></path></svg>
+          </button>
         </div>
         <div class="vpn-certificate-content">
           <p id="vpn-certificate-description">Cisco reported that the certificate for <strong id="vpn-certificate-server"></strong> does not match the server name and has expired.</p>
@@ -501,7 +622,7 @@
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" id="btn-cancel-vpn-certificate-modal">Cancel</button>
-          <button type="button" class="btn btn-primary" id="btn-accept-vpn-certificate-modal">Continue Once</button>
+          <button type="button" class="btn btn-primary" id="btn-accept-vpn-certificate-modal">Continue once</button>
         </div>
       </div>
     </div>

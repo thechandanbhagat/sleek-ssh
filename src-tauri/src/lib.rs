@@ -121,6 +121,8 @@ pub fn run() {
             commands::list_listening_ports,
             commands::kill_port_process,
             local_terminal::start_local_terminal,
+            local_terminal::validate_local_terminal_directory,
+            local_terminal::select_local_terminal_directory,
             local_terminal::write_local_terminal,
             local_terminal::resize_local_terminal,
             local_terminal::stop_local_terminal,

@@ -1,0 +1,172 @@
+.local-terminal-section {
+  gap: 14px;
+}
+
+.local-locations {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.local-locations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  list-style: none;
+}
+
+.local-location-item {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border-radius: 6px;
+}
+
+.local-location-item:hover,
+.local-location-item:focus-within {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.local-location-open {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-1);
+  text-align: left;
+  cursor: pointer;
+}
+
+.local-location-open:focus-visible {
+  outline-offset: -2px;
+}
+
+.local-location-name {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-location-path {
+  overflow: hidden;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-location-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.local-location-item .local-location-actions {
+  display: none;
+  flex: none;
+  padding-right: 6px;
+}
+
+.local-location-item:hover .local-location-actions,
+.local-location-item:focus-within .local-location-actions {
+  display: flex;
+}
+
+.local-location-item .local-location-actions .btn {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+#local-location-editor summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  color: var(--text-1);
+  font-size: 12.5px;
+  font-weight: 500;
+  list-style: none;
+  cursor: pointer;
+}
+
+#local-location-editor summary::-webkit-details-marker {
+  display: none;
+}
+
+#local-location-editor summary::before {
+  content: "+";
+  color: var(--text-3);
+  font-size: 15px;
+  line-height: 1;
+}
+
+#local-location-editor summary:hover {
+  background: var(--ink-3);
+}
+
+#local-location-editor[open] summary {
+  margin-bottom: 10px;
+}
+
+.local-location-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  background: var(--ink-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+
+.local-location-form label {
+  margin-top: 4px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.local-location-form input {
+  width: 100%;
+}
+
+.local-location-form > .btn {
+  align-self: flex-start;
+}
+
+.local-location-form .local-location-actions {
+  margin-top: 8px;
+}
+
+.local-location-form .local-location-actions .btn {
+  flex: 1;
+}
+
+.local-location-error {
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--danger-soft);
+  color: var(--text-1);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.local-locations button:disabled {
+  opacity: 0.45;
+  cursor: wait;
+}

@@ -2,6 +2,7 @@ use base64::Engine;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
@@ -9,6 +10,9 @@ use tauri::{AppHandle, Emitter, State};
 use crate::LocalTerminalMap;
 
 const MAX_LOCAL_TERMINAL_SESSION_ID_LENGTH: usize = 128;
+const POWERSHELL_START_DIRECTORY_ENV: &str = "SLEEKSSH_START_DIRECTORY";
+const POWERSHELL_START_DIRECTORY_COMMAND: &str =
+    "Set-Location -LiteralPath $env:SLEEKSSH_START_DIRECTORY -ErrorAction Stop; Remove-Item Env:\\SLEEKSSH_START_DIRECTORY";
 #[cfg(test)]
 const DEFAULT_TERMINAL_COLUMNS: u16 = 80;
 #[cfg(test)]
@@ -76,11 +80,49 @@ impl LocalTerminal {
 }
 
 #[tauri::command]
+pub(crate) async fn validate_local_terminal_directory(
+    working_directory: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        resolve_working_directory(Some(&working_directory))?;
+        Ok(working_directory)
+    })
+    .await
+    .map_err(|error| format!("Failed to validate local terminal folder: {error}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn select_local_terminal_directory() -> Result<Option<String>, String> {
+    let selected = tauri::async_runtime::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("Choose a PowerShell folder")
+            .pick_folder()
+    })
+    .await
+    .map_err(|error| format!("Failed to select local terminal folder: {error}"))?;
+    selected_local_terminal_directory(selected)
+}
+
+fn selected_local_terminal_directory(selected: Option<PathBuf>) -> Result<Option<String>, String> {
+    selected
+        .map(|path| {
+            let path = path
+                .into_os_string()
+                .into_string()
+                .map_err(|_| "Local terminal folder contains unsupported characters".to_string())?;
+            resolve_working_directory(Some(&path))?;
+            Ok(path)
+        })
+        .transpose()
+}
+
+#[tauri::command]
 pub(crate) async fn start_local_terminal(
     app_handle: AppHandle,
     state: State<'_, LocalTerminalMap>,
     session_id: String,
     shell: String,
+    working_directory: Option<String>,
     cols: u32,
     rows: u32,
 ) -> Result<(), String> {
@@ -90,7 +132,14 @@ pub(crate) async fn start_local_terminal(
     }
 
     let terminal = tauri::async_runtime::spawn_blocking(move || {
-        create_local_terminal(app_handle, session_id, &shell, cols, rows)
+        create_local_terminal(
+            app_handle,
+            session_id,
+            &shell,
+            working_directory.as_deref(),
+            cols,
+            rows,
+        )
     })
     .await
     .map_err(|error| format!("Local terminal task failed: {error}"))??;
@@ -111,23 +160,19 @@ fn create_local_terminal(
     app_handle: AppHandle,
     session_id: String,
     shell_name: &str,
+    working_directory: Option<&str>,
     cols: u32,
     rows: u32,
 ) -> Result<(String, LocalTerminal), String> {
     let shell = LocalShell::parse(shell_name)?;
     let size = terminal_size(cols, rows)?;
+    let working_directory = resolve_working_directory(working_directory)?;
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(size)
         .map_err(|error| format!("Failed to create local terminal: {error}"))?;
 
-    let mut command = CommandBuilder::new(shell.executable());
-    shell.configure(&mut command);
-    command.env("TERM", "xterm-256color");
-
-    if let Some(home_directory) = dirs::home_dir() {
-        command.cwd(home_directory);
-    }
+    let command = local_shell_command(shell, working_directory.as_deref());
 
     let child = pair
         .slave
@@ -161,6 +206,49 @@ fn create_local_terminal(
             should_exit,
         },
     ))
+}
+
+fn resolve_working_directory(value: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    if value.trim().is_empty() {
+        return Err("Local terminal folder is required".to_string());
+    }
+    if value.chars().any(char::is_control) {
+        return Err("Local terminal folder contains unsupported control characters".to_string());
+    }
+
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err("Local terminal folder must be an absolute path".to_string());
+    }
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| format!("Cannot open local terminal folder {value}: {error}"))?;
+    if !metadata.is_dir() {
+        return Err(format!("Local terminal location is not a folder: {value}"));
+    }
+
+    Ok(Some(path))
+}
+
+fn local_shell_command(shell: LocalShell, working_directory: Option<&Path>) -> CommandBuilder {
+    let mut command = CommandBuilder::new(shell.executable());
+    shell.configure(&mut command);
+    command.env("TERM", "xterm-256color");
+    let directory = working_directory
+        .map(Path::to_path_buf)
+        .or_else(dirs::home_dir);
+    if let Some(directory) = directory {
+        command.cwd(directory);
+    }
+    if let (LocalShell::PowerShell, Some(directory)) = (shell, working_directory) {
+        command.env(POWERSHELL_START_DIRECTORY_ENV, directory);
+        // Windows PowerShell can reset a working directory containing wildcard characters.
+        command.args(["-NoExit", "-Command", POWERSHELL_START_DIRECTORY_COMMAND]);
+    }
+    command
 }
 
 fn stream_local_terminal_output(
@@ -325,6 +413,239 @@ fn validate_session_id(session_id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "sleekssh-local-terminal-{}-{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn working_directory_defaults_to_home_when_omitted() {
+        assert_eq!(resolve_working_directory(None).unwrap(), None);
+        let command = local_shell_command(LocalShell::PowerShell, None);
+        assert_eq!(command.get_cwd().map(PathBuf::from), dirs::home_dir());
+        assert_eq!(
+            command.get_argv(),
+            &[
+                std::ffi::OsString::from("powershell.exe"),
+                std::ffi::OsString::from("-NoLogo")
+            ]
+        );
+        assert!(command.get_env(POWERSHELL_START_DIRECTORY_ENV).is_none());
+    }
+
+    #[tokio::test]
+    async fn validate_directory_command_returns_existing_folder_and_rejects_invalid_input() {
+        let directory = TestDirectory::new();
+        let path = directory.0.to_str().unwrap().to_string();
+        assert_eq!(
+            validate_local_terminal_directory(path.clone())
+                .await
+                .unwrap(),
+            path
+        );
+        assert!(validate_local_terminal_directory(String::new())
+            .await
+            .is_err());
+        assert!(validate_local_terminal_directory("relative".to_string())
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn folder_selection_preserves_cancellation_and_validates_selected_folder() {
+        let directory = TestDirectory::new();
+        assert_eq!(selected_local_terminal_directory(None).unwrap(), None);
+        assert_eq!(
+            selected_local_terminal_directory(Some(directory.0.clone())).unwrap(),
+            Some(directory.0.to_str().unwrap().to_string())
+        );
+        assert!(selected_local_terminal_directory(Some(directory.0.join("missing"))).is_err());
+    }
+
+    #[test]
+    fn working_directory_accepts_existing_folder_with_shell_metacharacters() {
+        let directory = TestDirectory::new();
+        let folder = directory.0.join("project [test] & 'quoted' $value; café");
+        std::fs::create_dir(&folder).unwrap();
+
+        assert_eq!(
+            resolve_working_directory(Some(folder.to_str().unwrap())).unwrap(),
+            Some(folder)
+        );
+    }
+
+    #[test]
+    fn working_directory_rejects_empty_relative_and_control_character_paths() {
+        for path in [
+            "",
+            "   ",
+            ".",
+            "relative/folder",
+            "C:\\project\n",
+            "C:\\project\0",
+        ] {
+            assert!(resolve_working_directory(Some(path)).is_err(), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn working_directory_rejects_missing_folders_and_files() {
+        let directory = TestDirectory::new();
+        let missing = directory.0.join("missing");
+        let file = directory.0.join("file.txt");
+        std::fs::write(&file, "file").unwrap();
+
+        assert!(resolve_working_directory(Some(missing.to_str().unwrap())).is_err());
+        assert!(resolve_working_directory(Some(file.to_str().unwrap())).is_err());
+    }
+
+    #[test]
+    fn shell_command_sets_directory_without_turning_it_into_shell_arguments() {
+        let path = Path::new("C:\\project [test] & 'quoted' $value; café");
+        let command = local_shell_command(LocalShell::PowerShell, Some(path));
+
+        assert_eq!(command.get_cwd().unwrap(), path.as_os_str());
+        assert_eq!(
+            command.get_argv(),
+            &[
+                std::ffi::OsString::from("powershell.exe"),
+                std::ffi::OsString::from("-NoLogo"),
+                std::ffi::OsString::from("-NoExit"),
+                std::ffi::OsString::from("-Command"),
+                std::ffi::OsString::from(POWERSHELL_START_DIRECTORY_COMMAND)
+            ]
+        );
+        assert_eq!(
+            command.get_env(POWERSHELL_START_DIRECTORY_ENV).unwrap(),
+            path.as_os_str()
+        );
+    }
+
+    #[test]
+    fn shell_command_supports_command_prompt_and_no_directory() {
+        let command = local_shell_command(LocalShell::CommandPrompt, None);
+
+        assert_eq!(command.get_cwd().map(PathBuf::from), dirs::home_dir());
+        assert_eq!(command.get_argv(), &[std::ffi::OsString::from("cmd.exe")]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_process_starts_in_folder_with_shell_metacharacters() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        const CAPTURE_COLUMNS: u32 = 512;
+        const PROCESS_TIMEOUT: Duration = Duration::from_secs(15);
+        const OUTPUT_TIMEOUT: Duration = Duration::from_secs(5);
+        const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
+        const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+        const CURSOR_REPORT: &[u8] = b"\x1b[1;1R";
+        const CAPTURE_BUFFER_BYTES: usize = 4096;
+        const PROMPT_SUFFIX: &[u8] = b"> ";
+        const DIRECTORY_MARKER: &str = "SLEEKSSH_CWD=";
+        const CAPTURE_COMMAND: &[u8] =
+            b"[Console]::WriteLine('SLEEKSSH_CWD=' + (Get-Location).Path); exit\r";
+
+        let directory = TestDirectory::new();
+        let folder = directory.0.join("project [test] & 'quoted' $value");
+        std::fs::create_dir(&folder).unwrap();
+        let mut command = local_shell_command(LocalShell::PowerShell, Some(&folder));
+        command
+            .get_argv_mut()
+            .insert(1, std::ffi::OsString::from("-NoProfile"));
+
+        let pair = native_pty_system()
+            .openpty(terminal_size(CAPTURE_COLUMNS, DEFAULT_TERMINAL_ROWS.into()).unwrap())
+            .unwrap();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let reader_thread = std::thread::spawn(move || {
+            let result = (|| -> std::io::Result<Vec<u8>> {
+                let mut output = Vec::new();
+                let mut buffer = [0; CAPTURE_BUFFER_BYTES];
+                let mut queries_answered = 0;
+                let mut command_sent = false;
+                loop {
+                    let count = reader.read(&mut buffer)?;
+                    if count == 0 {
+                        return Ok(output);
+                    }
+                    output.extend_from_slice(&buffer[..count]);
+                    let queries = output
+                        .windows(CURSOR_QUERY.len())
+                        .filter(|window| *window == CURSOR_QUERY)
+                        .count();
+                    // ConPTY waits for the terminal's cursor report before PowerShell can proceed.
+                    for _ in queries_answered..queries {
+                        writer.write_all(CURSOR_REPORT)?;
+                        writer.flush()?;
+                    }
+                    queries_answered = queries;
+                    if !command_sent
+                        && output
+                            .windows(PROMPT_SUFFIX.len())
+                            .any(|window| window == PROMPT_SUFFIX)
+                    {
+                        writer.write_all(CAPTURE_COMMAND)?;
+                        writer.flush()?;
+                        command_sent = true;
+                    }
+                }
+            })();
+            sender.send(result).unwrap();
+        });
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let deadline = Instant::now() + PROCESS_TIMEOUT;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                break None;
+            }
+            std::thread::sleep(PROCESS_POLL_INTERVAL);
+        };
+        drop(pair.master);
+        let output = receiver.recv_timeout(OUTPUT_TIMEOUT).unwrap().unwrap();
+        reader_thread.join().unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(status
+            .unwrap_or_else(|| panic!("PowerShell exceeded its timeout: {output:?}"))
+            .success());
+        let marker = output
+            .rfind(DIRECTORY_MARKER)
+            .unwrap_or_else(|| panic!("PowerShell did not report its directory: {output:?}"));
+        let reported_directory = output[marker + DIRECTORY_MARKER.len()..]
+            .split(['\r', '\n', '\x1b'])
+            .next()
+            .unwrap();
+        assert_eq!(
+            std::fs::canonicalize(reported_directory).unwrap(),
+            std::fs::canonicalize(&folder).unwrap(),
+            "PowerShell reported an unexpected directory: {output:?}"
+        );
+    }
 
     #[test]
     fn local_shell_parse_accepts_supported_shells() {
