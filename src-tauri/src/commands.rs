@@ -17,7 +17,8 @@ const INTERACTIVE_SSH_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const INTERACTIVE_SSH_WRITE_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 const SFTP_DIRECTORY_TIMEOUT_MILLISECONDS: u32 = 5_000;
 const SFTP_TRANSFER_TIMEOUT_MILLISECONDS: u32 = 30_000;
-const TERMINAL_SETUP_MAX_BYTES: usize = 4 * 1024 - 1;
+const TERMINAL_SETUP_MAX_BYTES: usize = 64 * 1024;
+const TERMINAL_SETUP_LINE_MAX_BYTES: usize = 1024;
 const TERMINAL_BOOTSTRAP_MAX_OUTPUT_BYTES: usize = 256 * 1024;
 const TERMINAL_BOOTSTRAP_READ_BUFFER_BYTES: usize = 8192;
 const SUDO_TTY_CHECK_TIMEOUT_MILLISECONDS: u32 = 2_000;
@@ -687,7 +688,6 @@ fn validate_terminal_setup(setup: Option<String>) -> Result<Option<String>, Stri
     if setup.contains(['\0', '\r', '\n']) {
         return Err("Terminal setup must be a single line without NUL characters".to_string());
     }
-    // Canonical terminals discard input beyond this limit before `read` receives it.
     if setup.len() > TERMINAL_SETUP_MAX_BYTES {
         return Err(format!(
             "Terminal setup exceeds {} bytes",
@@ -703,11 +703,38 @@ fn validate_terminal_setup(setup: Option<String>) -> Result<Option<String>, Stri
 fn create_terminal_bootstrap(setup: &str, token: u64) -> TerminalBootstrap {
     let started_label = format!("9;sleekssh-{token:016x}-start");
     let ready_label = format!("9;sleekssh-{token:016x}-ready");
+    let mut remaining = setup;
+    let mut payload = Vec::new();
+    let mut chunk_count = 0;
+    while !remaining.is_empty() {
+        // Canonical terminals truncate long input lines before the shell can read them.
+        let mut boundary = remaining.len().min(TERMINAL_SETUP_LINE_MAX_BYTES);
+        while !remaining.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        payload.extend_from_slice(remaining[..boundary].as_bytes());
+        payload.push(b'\n');
+        remaining = &remaining[boundary..];
+        chunk_count += 1;
+    }
     TerminalBootstrap {
         command: format!(
-            " stty -echo && printf '\\033]{started_label}\\007'; IFS= read -r __sleekssh_setup; eval \"$__sleekssh_setup\"; unset __sleekssh_setup; stty echo && printf '\\033]{ready_label}\\007'"
+            concat!(
+                " stty -echo && {{ printf '\\033]{started_label}\\007'; ",
+                "__sleekssh_setup=; __sleekssh_remaining={chunk_count}; ",
+                "while [ \"$__sleekssh_remaining\" -gt 0 ] && IFS= read -r __sleekssh_chunk; do ",
+                "__sleekssh_setup=\"$__sleekssh_setup$__sleekssh_chunk\"; ",
+                "__sleekssh_remaining=$((__sleekssh_remaining - 1)); done; ",
+                "if [ \"$__sleekssh_remaining\" -eq 0 ]; then eval \"$__sleekssh_setup\"; ",
+                "unset __sleekssh_setup __sleekssh_chunk __sleekssh_remaining; ",
+                "stty echo && printf '\\033]{ready_label}\\007'; ",
+                "else unset __sleekssh_setup __sleekssh_chunk __sleekssh_remaining; stty echo; fi; }}"
+            ),
+            started_label = started_label,
+            ready_label = ready_label,
+            chunk_count = chunk_count,
         ),
-        payload: format!("{setup}\n").into_bytes(),
+        payload,
         started_marker: format!("\x1b]{started_label}\x07").into_bytes(),
         ready_marker: format!("\x1b]{ready_label}\x07").into_bytes(),
     }
@@ -2063,11 +2090,30 @@ mod tests {
     }
 
     #[test]
-    fn terminal_setup_enforces_the_canonical_terminal_byte_limit() {
+    fn terminal_setup_enforces_the_total_script_byte_limit() {
         let maximum = "a".repeat(TERMINAL_SETUP_MAX_BYTES);
         assert!(validate_terminal_setup(Some(maximum)).is_ok());
+        let unicode_maximum = "é".repeat(TERMINAL_SETUP_MAX_BYTES / "é".len());
+        assert!(validate_terminal_setup(Some(unicode_maximum.clone())).is_ok());
+        assert!(validate_terminal_setup(Some(format!("{unicode_maximum}a"))).is_err());
         assert!(validate_terminal_setup(Some("a".repeat(TERMINAL_SETUP_MAX_BYTES + 1))).is_err());
         assert!(validate_terminal_setup(Some("é".repeat(TERMINAL_SETUP_MAX_BYTES))).is_err());
+    }
+
+    #[test]
+    fn terminal_setup_accepts_shell_integration_with_the_sudo_wrapper() {
+        const SETUP_COMMAND_REPETITIONS: usize = 128;
+        let setup = format!(
+            "{}; {}",
+            "printf 'shell integration'; ".repeat(SETUP_COMMAND_REPETITIONS),
+            ssh_security::create_sudo_shell_setup(1)
+        );
+
+        assert!(setup.len() > TERMINAL_SETUP_LINE_MAX_BYTES);
+        assert_eq!(
+            validate_terminal_setup(Some(setup.clone())).unwrap(),
+            Some(setup)
+        );
     }
 
     #[test]
@@ -2076,7 +2122,7 @@ mod tests {
         let bootstrap = create_terminal_bootstrap(setup, 1);
 
         assert!(!bootstrap.command.contains(setup));
-        assert!(bootstrap.command.contains("IFS= read -r __sleekssh_setup"));
+        assert!(bootstrap.command.contains("IFS= read -r __sleekssh_chunk"));
         assert!(bootstrap.command.contains("eval \"$__sleekssh_setup\""));
         assert!(bootstrap.command.contains("stty echo && printf"));
         assert_eq!(bootstrap.payload, format!("{setup}\n").as_bytes());
@@ -2085,6 +2131,52 @@ mod tests {
             b"\x1b]9;sleekssh-0000000000000001-start\x07"
         );
         assert_ne!(bootstrap.started_marker, bootstrap.ready_marker);
+    }
+
+    #[test]
+    fn terminal_bootstrap_bounds_each_input_line_and_reconstructs_the_entire_script() {
+        for setup_bytes in [
+            0,
+            1,
+            TERMINAL_SETUP_LINE_MAX_BYTES - 1,
+            TERMINAL_SETUP_LINE_MAX_BYTES,
+            TERMINAL_SETUP_LINE_MAX_BYTES + 1,
+            TERMINAL_SETUP_MAX_BYTES,
+        ] {
+            let setup = "a".repeat(setup_bytes);
+            let bootstrap = create_terminal_bootstrap(&setup, 1);
+            let payload = String::from_utf8(bootstrap.payload).unwrap();
+            let chunks: Vec<&str> = payload.lines().collect();
+
+            assert_eq!(chunks.concat(), setup);
+            assert!(chunks.iter().all(|chunk| {
+                !chunk.is_empty() && chunk.len() <= TERMINAL_SETUP_LINE_MAX_BYTES
+            }));
+            assert!(bootstrap.command.len() <= TERMINAL_SETUP_LINE_MAX_BYTES);
+            assert!(bootstrap
+                .command
+                .contains(&format!("__sleekssh_remaining={};", chunks.len())));
+            assert_eq!(payload.ends_with('\n'), !setup.is_empty());
+        }
+    }
+
+    #[test]
+    fn terminal_bootstrap_chunks_preserve_utf8_whitespace_and_literal_shell_text() {
+        let setup = format!(
+            "{}é😀  printf '%s' 'apostrophe '\\'' and \\\\ backslashes';  ",
+            " ".repeat(TERMINAL_SETUP_LINE_MAX_BYTES - 1)
+        );
+        let bootstrap = create_terminal_bootstrap(&setup, 1);
+        let payload = String::from_utf8(bootstrap.payload).unwrap();
+        let chunks: Vec<&str> = payload.lines().collect();
+
+        assert!(chunks.len() > 1);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.len() <= TERMINAL_SETUP_LINE_MAX_BYTES));
+        assert_eq!(chunks[0].len(), TERMINAL_SETUP_LINE_MAX_BYTES - 1);
+        assert!(chunks[1].starts_with("é😀"));
+        assert_eq!(chunks.concat(), setup);
     }
 
     #[test]

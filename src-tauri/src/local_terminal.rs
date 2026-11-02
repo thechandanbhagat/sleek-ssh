@@ -13,6 +13,29 @@ const MAX_LOCAL_TERMINAL_SESSION_ID_LENGTH: usize = 128;
 const POWERSHELL_START_DIRECTORY_ENV: &str = "SLEEKSSH_START_DIRECTORY";
 const POWERSHELL_START_DIRECTORY_COMMAND: &str =
     "Set-Location -LiteralPath $env:SLEEKSSH_START_DIRECTORY -ErrorAction Stop; Remove-Item Env:\\SLEEKSSH_START_DIRECTORY";
+const POWERSHELL_COMMAND_HISTORY_SCRIPT: &str = r#"
+$global:__SleekSSHOriginalPrompt = ${function:global:prompt}
+$global:__SleekSSHHistoryEscape = [char]27
+$global:__SleekSSHHistoryBell = [char]7
+function global:prompt {
+    [Console]::Write("$global:__SleekSSHHistoryEscape]6973;prompt-start$global:__SleekSSHHistoryBell")
+    $promptText = if ($global:__SleekSSHOriginalPrompt) { & $global:__SleekSSHOriginalPrompt } else { 'PS ' + $executionContext.SessionState.Path.CurrentLocation + '> ' }
+    [string]::Concat([object[]]@($promptText)) + "$global:__SleekSSHHistoryEscape]6973;prompt-end$global:__SleekSSHHistoryBell"
+}
+if (-not ${function:global:PSConsoleHostReadLine}) { Import-Module PSReadLine -ErrorAction Stop }
+$global:__SleekSSHOriginalReadLine = ${function:global:PSConsoleHostReadLine}
+if (-not $global:__SleekSSHOriginalReadLine) { throw 'The PowerShell line editor is unavailable for command history.' }
+function global:PSConsoleHostReadLine {
+    $commandLine = & $global:__SleekSSHOriginalReadLine
+    if (-not [string]::IsNullOrWhiteSpace($commandLine)) {
+        $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($commandLine))
+        [Console]::Write("$global:__SleekSSHHistoryEscape]6973;command;$encodedCommand$global:__SleekSSHHistoryBell")
+    }
+    [Console]::Write("$global:__SleekSSHHistoryEscape]6973;busy$global:__SleekSSHHistoryBell")
+    $commandLine
+}
+"#;
+const COMMAND_PROMPT_HISTORY_PROMPT: &str = "$E]6973;prompt-start$E\\$P$G$S$E]6973;prompt-end$E\\";
 #[cfg(test)]
 const DEFAULT_TERMINAL_COLUMNS: u16 = 80;
 #[cfg(test)]
@@ -243,10 +266,20 @@ fn local_shell_command(shell: LocalShell, working_directory: Option<&Path>) -> C
     if let Some(directory) = directory {
         command.cwd(directory);
     }
-    if let (LocalShell::PowerShell, Some(directory)) = (shell, working_directory) {
-        command.env(POWERSHELL_START_DIRECTORY_ENV, directory);
-        // Windows PowerShell can reset a working directory containing wildcard characters.
-        command.args(["-NoExit", "-Command", POWERSHELL_START_DIRECTORY_COMMAND]);
+    match shell {
+        LocalShell::PowerShell => {
+            let setup = if let Some(directory) = working_directory {
+                command.env(POWERSHELL_START_DIRECTORY_ENV, directory);
+                // Windows PowerShell can reset a working directory containing wildcard characters.
+                format!("{POWERSHELL_START_DIRECTORY_COMMAND}; {POWERSHELL_COMMAND_HISTORY_SCRIPT}")
+            } else {
+                POWERSHELL_COMMAND_HISTORY_SCRIPT.to_string()
+            };
+            command.args(["-NoExit", "-Command", &setup]);
+        }
+        LocalShell::CommandPrompt => {
+            command.env("PROMPT", COMMAND_PROMPT_HISTORY_PROMPT);
+        }
     }
     command
 }
@@ -443,7 +476,10 @@ mod tests {
             command.get_argv(),
             &[
                 std::ffi::OsString::from("powershell.exe"),
-                std::ffi::OsString::from("-NoLogo")
+                std::ffi::OsString::from("-NoLogo"),
+                std::ffi::OsString::from("-NoExit"),
+                std::ffi::OsString::from("-Command"),
+                std::ffi::OsString::from(POWERSHELL_COMMAND_HISTORY_SCRIPT)
             ]
         );
         assert!(command.get_env(POWERSHELL_START_DIRECTORY_ENV).is_none());
@@ -528,7 +564,9 @@ mod tests {
                 std::ffi::OsString::from("-NoLogo"),
                 std::ffi::OsString::from("-NoExit"),
                 std::ffi::OsString::from("-Command"),
-                std::ffi::OsString::from(POWERSHELL_START_DIRECTORY_COMMAND)
+                std::ffi::OsString::from(format!(
+                    "{POWERSHELL_START_DIRECTORY_COMMAND}; {POWERSHELL_COMMAND_HISTORY_SCRIPT}"
+                ))
             ]
         );
         assert_eq!(
@@ -543,6 +581,32 @@ mod tests {
 
         assert_eq!(command.get_cwd().map(PathBuf::from), dirs::home_dir());
         assert_eq!(command.get_argv(), &[std::ffi::OsString::from("cmd.exe")]);
+        assert_eq!(
+            command.get_env("PROMPT").unwrap(),
+            std::ffi::OsStr::new(COMMAND_PROMPT_HISTORY_PROMPT)
+        );
+    }
+
+    #[test]
+    fn shell_integration_marks_the_prompt_and_only_accepted_powershell_commands() {
+        let prompt_start = POWERSHELL_COMMAND_HISTORY_SCRIPT
+            .find("6973;prompt-start")
+            .unwrap();
+        let prompt_end = POWERSHELL_COMMAND_HISTORY_SCRIPT
+            .find("6973;prompt-end")
+            .unwrap();
+        let accepted = POWERSHELL_COMMAND_HISTORY_SCRIPT
+            .find("$commandLine = & $global:__SleekSSHOriginalReadLine")
+            .unwrap();
+        let command_marker = POWERSHELL_COMMAND_HISTORY_SCRIPT
+            .find("6973;command;")
+            .unwrap();
+        let busy_marker = POWERSHELL_COMMAND_HISTORY_SCRIPT.find("6973;busy").unwrap();
+        assert!(prompt_start < prompt_end);
+        assert!(accepted < command_marker && command_marker < busy_marker);
+        assert!(POWERSHELL_COMMAND_HISTORY_SCRIPT
+            .contains("[Text.Encoding]::UTF8.GetBytes($commandLine)"));
+        assert!(!POWERSHELL_COMMAND_HISTORY_SCRIPT.contains("Get-History"));
     }
 
     #[cfg(windows)]
