@@ -4,6 +4,7 @@ Unreleased. Documentation reviewed 2 November 2026; repository maintainers revie
 
 ## What's new
 
+- **Consistent side panels:** Files, Agent, History, and Snippets use the same saved width. Resize any panel with its divider or keyboard controls. Snippets has its own top-level tab, and saved workspaces restore it as the selected panel.
 - **Split terminals:** Open two independent SSH or local terminals in a tab with **Split right** or **Split below**. Resize the divider, switch focus with **Ctrl+Alt+Arrow**, and close one pane with **Ctrl+Alt+W**. Files, History, snippets, and new Agent tasks follow the focused pane.
 - **Command history and suggestions:** Search terminal and executed Agent commands in last-used order, newest first. Compact rows keep commands, run counts, and snippet actions together; terminal/Agent totals appear on the count tooltip. History persists per server or local shell. Faint inline suggestions accept **Tab** and dismiss with **Esc**; a leading space excludes a command from history. Password responses and recognized inline credentials are excluded.
 - **Named snippets:** Save commands as reusable templates with `{{parameters}}`. Review the rendered command, target pane, and shell before inserting or running it. Snippets can be shared or limited to an SSH server and folder, including subfolders. Preview expiry prevents a changed target or prompt from reusing an earlier review.
