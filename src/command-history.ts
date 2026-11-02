@@ -176,7 +176,7 @@ export function createCommandHistory(options: HistoryOptions) {
       const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
       const entries = contexts.find(context => context.key === key)?.entries ?? [];
       return Object.freeze(entries.filter(entry => words.every(word => entry.command.toLowerCase().includes(word)))
-        .sort((left, right) => right.runCount - left.runCount || recentFirst(left, right)));
+        .sort(recentFirst));
     },
     subscribe(listener: () => void): () => void {
       if (typeof listener !== "function") throw new Error("Command history subscriber must be a function.");

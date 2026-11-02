@@ -69,7 +69,7 @@ test("command histories remain isolated by server and shell and return immutable
   assert.equal(saved.contexts.find((context: HistoryContext) => context.key === CONTEXT.key).label, "Renamed production");
 });
 
-test("history searches all words without case sensitivity and ranks frequent commands before recent commands", () => {
+test("history searches all words without case sensitivity and ranks last used before frequency", () => {
   const storage = createStorage();
   let timestamp = 0;
   const history = createCommandHistory({ storage, now: () => timestamp++ });
@@ -77,9 +77,27 @@ test("history searches all words without case sensitivity and ranks frequent com
   history.record(CONTEXT, "systemctl status nginx", "agent");
   history.record(CONTEXT, "systemctl reload nginx", "terminal");
   history.record(CONTEXT, "ls -la", "terminal");
-  assert.deepEqual(history.entries(CONTEXT.key, "NGINX system").map(entry => entry.command), ["systemctl status nginx", "systemctl reload nginx"]);
-  assert.deepEqual(history.entries(CONTEXT.key, "   ").map(entry => entry.command), ["systemctl status nginx", "ls -la", "systemctl reload nginx"]);
+  assert.deepEqual(history.entries(CONTEXT.key, "NGINX system").map(entry => entry.command), ["systemctl reload nginx", "systemctl status nginx"]);
+  assert.deepEqual(history.entries(CONTEXT.key, "   ").map(entry => entry.command), ["ls -la", "systemctl reload nginx", "systemctl status nginx"]);
   assert.deepEqual(history.entries(CONTEXT.key, "missing"), []);
+  history.record(CONTEXT, "systemctl status nginx", "terminal");
+  const expected = ["systemctl status nginx", "ls -la", "systemctl reload nginx"];
+  assert.deepEqual(history.entries(CONTEXT.key).map(entry => entry.command), expected);
+  assert.deepEqual(createCommandHistory({ storage }).entries(CONTEXT.key).map(entry => entry.command), expected);
+});
+
+test("history uses deterministic ties and accepts the maximum timestamp in last-used ordering", () => {
+  const storage = createStorage();
+  let timestamp = 0;
+  const history = createCommandHistory({ storage, now: () => timestamp });
+  history.record(CONTEXT, "whoami", "terminal");
+  history.record(CONTEXT, "pwd", "terminal");
+  history.record(CONTEXT, "whoami", "agent");
+  history.record(CONTEXT, "ls", "terminal");
+  assert.deepEqual(history.entries(CONTEXT.key).map(entry => entry.command), ["whoami", "ls", "pwd"]);
+  timestamp = Number.MAX_SAFE_INTEGER;
+  history.record(CONTEXT, "date", "terminal");
+  assert.deepEqual(history.entries(CONTEXT.key).map(entry => entry.command), ["date", "whoami", "ls", "pwd"]);
 });
 
 test("blank commands and obvious credential-bearing commands never reach persistent history", () => {

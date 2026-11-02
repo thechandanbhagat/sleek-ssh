@@ -307,7 +307,7 @@ test("terminal and agent executions merge by stable server context and count onc
     command, runCount: 3, terminalCount: 2, agentCount: 1, lastRunAt: 0,
   });
   assert.equal(harness.button(command).querySelector(".command-history-count")?.textContent, "3 runs");
-  assert.equal(harness.button(command).querySelector(".command-history-source")?.textContent, "2 terminal · 1 agent");
+  assert.equal(harness.button(command).querySelector(".command-history-count")?.getAttribute("title"), "2 terminal · 1 agent");
 });
 
 test("a reconnect reuses server history while pinned agent targets stay separate from the selected server", () => {

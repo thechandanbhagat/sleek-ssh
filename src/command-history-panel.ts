@@ -59,22 +59,23 @@ export function initCommandHistoryPanel(options: CommandHistoryPanelOptions) {
         const command = document.createElement("code");
         command.className = "command-history-command";
         command.textContent = entry.command;
+        command.title = entry.command;
         const count = document.createElement("span");
         count.className = "command-history-count";
         count.textContent = `${entry.runCount} ${entry.runCount === 1 ? "run" : "runs"}`;
-        const source = document.createElement("span");
-        source.className = "command-history-source";
-        source.textContent = `${entry.terminalCount} terminal · ${entry.agentCount} agent`;
-        button.append(command, count, source);
+        count.title = `${entry.terminalCount} terminal · ${entry.agentCount} agent`;
+        count.setAttribute("aria-label", `${count.textContent}, ${count.title}`);
+        button.append(command, count);
         button.addEventListener("click", () => insert(entry.command));
         item.append(button);
         if (options.saveSnippet) {
           const save = document.createElement("button");
           save.type = "button";
-          save.className = "command-history-save-snippet btn btn-secondary";
-          save.textContent = "Save as snippet";
+          save.className = "command-history-save-snippet";
+          save.setAttribute("aria-label", `Save as snippet: ${entry.command}`);
+          save.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10a1 1 0 0 1 1 1v17l-6-4-6 4V4a1 1 0 0 1 1-1Z"></path><path d="M9 8h6M12 5v6"></path></svg>';
           save.disabled = /[\r\n\t]/.test(entry.command);
-          save.title = save.disabled ? "Snippets support single-line commands." : "Name and parameterize this command";
+          save.title = save.disabled ? "Snippets support single-line commands." : "Save as snippet";
           save.addEventListener("click", () => {
             if (disposed) return;
             try { options.saveSnippet?.(entry.command); }

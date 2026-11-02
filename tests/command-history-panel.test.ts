@@ -25,6 +25,8 @@ function createHarness(configuration: {
   contextError?: Error;
   insertError?: Error;
   closeError?: Error;
+  now?: () => number;
+  saveSnippet?: (command: string) => void;
 } = {}) {
   const { document, window } = parseHTML(MARKUP);
   const root = document.getElementById("command-history-panel") as HTMLElement;
@@ -33,7 +35,7 @@ function createHarness(configuration: {
   const history = createCommandHistory({ storage: {
     getItem: key => values.get(key) ?? null,
     setItem: (key, value) => { values.set(key, value); },
-  }, now: () => 0 });
+  }, now: configuration.now ?? (() => 0) });
   let context = configuration.context === undefined ? CONTEXT : configuration.context;
   let contextError = configuration.contextError;
   const insertions: string[] = [];
@@ -44,6 +46,7 @@ function createHarness(configuration: {
     history,
     getContext: () => { if (contextError) throw contextError; return context; },
     insert: command => { if (configuration.insertError) throw configuration.insertError; insertions.push(command); },
+    saveSnippet: configuration.saveSnippet,
     onClose: () => { if (configuration.closeError) throw configuration.closeError; closeCount += 1; },
     onError: cause => { errors.push(cause); },
   });
@@ -111,12 +114,46 @@ test("history panel automatically refreshes execution counts and inserts command
   assert.equal(button.type, "button");
   assert.equal(button.querySelector(".command-history-command")?.textContent, "systemctl status nginx");
   assert.equal(button.querySelector(".command-history-count")?.textContent, "2 runs");
-  assert.equal(button.querySelector(".command-history-source")?.textContent, "1 terminal · 1 agent");
+  assert.equal(button.querySelector(".command-history-count")?.getAttribute("title"), "1 terminal · 1 agent");
+  assert.equal(button.querySelector(".command-history-count")?.getAttribute("aria-label"), "2 runs, 1 terminal · 1 agent");
   assert.match(button.title, /without running/);
   button.click();
   assert.deepEqual(harness.insertions, ["systemctl status nginx"]);
   assert.equal(harness.history.entries(CONTEXT.key)[0].runCount, 2);
   assert.equal(harness.control("command-history-empty").hidden, true);
+});
+
+test("history panel puts a newly used command first regardless of its run count", () => {
+  let timestamp = 0;
+  const harness = createHarness({ now: () => timestamp++ });
+  harness.history.record(CONTEXT, "pm2 log 6", "terminal");
+  harness.history.record(CONTEXT, "pm2 log 6", "terminal");
+  harness.history.record(CONTEXT, "pm2 list", "agent");
+  const commands = () => [...harness.root.querySelectorAll(".command-history-command")].map(element => element.textContent);
+  assert.deepEqual(commands(), ["pm2 list", "pm2 log 6"]);
+  harness.search("pm2");
+  assert.deepEqual(commands(), ["pm2 list", "pm2 log 6"]);
+  harness.history.record(CONTEXT, "pm2 log 6", "agent");
+  assert.deepEqual(commands(), ["pm2 log 6", "pm2 list"]);
+});
+
+test("compact history rows keep a labelled snippet action independent of command insertion", () => {
+  const snippets: string[] = [];
+  const harness = createHarness({ saveSnippet: command => snippets.push(command) });
+  const command = "systemctl status nginx";
+  harness.history.record(CONTEXT, command, "terminal");
+  const save = harness.root.querySelector<HTMLButtonElement>(".command-history-save-snippet");
+  assert(save);
+  assert.equal(save.getAttribute("aria-label"), `Save as snippet: ${command}`);
+  assert.equal(save.title, "Save as snippet");
+  assert.equal(harness.button().querySelector("code")?.getAttribute("title"), command);
+  save.click();
+  assert.deepEqual(snippets, [command]);
+  assert.deepEqual(harness.insertions, []);
+  harness.history.record(CONTEXT, "printf first\nprintf second", "terminal");
+  const multilineSave = [...harness.root.querySelectorAll<HTMLButtonElement>(".command-history-save-snippet")]
+    .find(button => button.getAttribute("aria-label")?.includes("\n"));
+  assert(multilineSave?.disabled);
 });
 
 test("history panel filters command text and isolates the currently selected server or shell", () => {
