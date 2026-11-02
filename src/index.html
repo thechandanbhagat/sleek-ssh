@@ -247,19 +247,19 @@
           <!-- Session containers are added here -->
         </div>
 
+        <div class="panel-resize-handle" id="side-panel-resize-handle" role="separator" tabindex="0" aria-label="Resize side panel" aria-orientation="vertical" hidden></div>
         <section class="automation-panel side-panel" id="automation-panel" aria-labelledby="automation-title" hidden>
           <header class="side-panel-header">
             <div class="side-panel-tabs" role="group" aria-label="Side panel">
               <button class="side-panel-tab" id="automation-files-tab" type="button" aria-pressed="false" title="Show files for this server">
-                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h3.6l2 2h7.4a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"></path></svg>
                 <span>Files</span>
               </button>
               <span class="side-panel-tab is-active" aria-current="true">
-                <svg class="icon icon-agent" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9-1.9 5.1-1.9-5.1L5 10.5l5.1-1.9z"></path><path d="M18.5 16.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"></path></svg>
                 <span id="automation-title">Agent</span>
                 <span class="attention-dot" id="automation-attention" hidden></span>
               </span>
               <button class="side-panel-tab" id="automation-history-tab" type="button" aria-pressed="false">History</button>
+              <button class="side-panel-tab" id="automation-snippets-tab" type="button" aria-pressed="false">Snippets</button>
             </div>
             <details class="menu" id="automation-menu">
               <summary class="icon-button" title="More agent options" aria-label="More agent options">
@@ -368,16 +368,13 @@
             <div class="side-panel-tabs" role="group" aria-label="Side panel">
               <button class="side-panel-tab" id="command-history-files-tab" type="button" aria-pressed="false">Files</button>
               <button class="side-panel-tab" id="command-history-agent-tab" type="button" aria-pressed="false">Agent</button>
-              <span class="side-panel-tab is-active" aria-current="true" id="command-history-title">History</span>
+              <button class="side-panel-tab is-active" id="command-history-view-history" type="button" aria-pressed="true" aria-controls="command-history-browser"><span id="command-history-title">History</span></button>
+              <button class="side-panel-tab" id="command-history-view-snippets" type="button" aria-pressed="false" aria-controls="named-snippets-root">Snippets</button>
             </div>
             <button class="icon-button" id="command-history-close" type="button" title="Hide command history" aria-label="Hide command history">
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"></path></svg>
             </button>
           </header>
-          <div class="command-history-views" role="group" aria-label="Command library">
-            <button id="command-history-view-history" class="btn btn-secondary" type="button" aria-pressed="true" aria-controls="command-history-browser">History</button>
-            <button id="command-history-view-snippets" class="btn btn-secondary" type="button" aria-pressed="false" aria-controls="named-snippets-root">Snippets</button>
-          </div>
           <div id="command-history-browser">
             <div class="command-history-controls">
               <p id="command-history-target"></p>

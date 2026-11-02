@@ -125,7 +125,7 @@ test("names and identifiers trim whitespace while all returned workspace data is
 test("nullable startup folders and names, both shell kinds, and every sidebar and side panel are supported", () => {
   for (const shell of ["powershell", "cmd"] as const) {
     for (const sidebarView of ["connections", "terminal", "keys", "vpn", "workspaces"] as const) {
-      for (const sidePanel of ["none", "files", "history", "agent"] as const) {
+      for (const sidePanel of ["none", "files", "history", "agent", "snippets"] as const) {
         const snapshot = {
           tabs: [{ kind: "ssh", profileId: "server", name: "API", remotePath: null, sftpPanelOpen: false },
             { kind: "local", shell, workingDirectory: null, locationName: null }],

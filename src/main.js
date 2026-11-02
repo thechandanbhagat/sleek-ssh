@@ -787,6 +787,7 @@ function initAutomationPanel() {
       session.container.querySelector(".sftp-close")?.focus();
     },
     onHistory: () => window.SleekSshHistory?.controller?.open(),
+    onSnippets: () => window.SleekSshHistory?.controller?.openSnippets(),
     onError: message => showNotification(message)
   });
 }
@@ -861,7 +862,9 @@ function initSavedWorkspaces() {
 
 function captureWorkspaceState() {
   const activeSession = getActiveSession();
-  const historyOpen = document.getElementById("command-history-panel")?.hidden === false;
+  const historyPanel = document.getElementById("command-history-panel");
+  const historyOpen = historyPanel?.hidden === false;
+  const historyView = historyPanel?.dataset.view === "snippets" ? "snippets" : "history";
   return {
     sessions: Array.from(tabsContainer.querySelectorAll(".terminal-tab")).map(tab => {
       const group = terminalGroups?.get(tab.dataset.id);
@@ -876,7 +879,7 @@ function captureWorkspaceState() {
       ...panelLayoutPreferences,
       sidebarView: workspaceSidebarOrigin?.sidebarView || document.querySelector(".nav-tab.active")?.dataset.tab || "connections",
       sidebarOpen: workspaceSidebarOrigin?.sidebarOpen ?? panelLayoutPreferences.sidebarOpen,
-      sidePanel: historyOpen ? "history" : agentUiState.open ? "agent"
+      sidePanel: historyOpen ? historyView : agentUiState.open ? "agent"
         : activeSession?.kind === "ssh" && activeSession.sftpPanelOpen !== false ? "files" : "none"
     }
   };
@@ -945,6 +948,7 @@ function restoreWorkspaceLayout(layout, sessionId) {
     saveSftpExplorerState(session);
   }
   if (layout.sidePanel === "history") window.SleekSshHistory?.controller?.open();
+  if (layout.sidePanel === "snippets") window.SleekSshHistory?.controller?.openSnippets();
   if (layout.sidePanel === "agent") openAgentPanel();
   refreshPanelLayout();
   refreshWorkspaceChrome();
@@ -1047,11 +1051,26 @@ function refreshPanelLayout() {
   if (!app || !sidebar || typeof app.getBoundingClientRect !== "function") return;
   const agentPanel = document.getElementById("automation-panel");
   const historyPanel = document.getElementById("command-history-panel");
-  const agentWidth = agentPanel && agentPanel.hidden === false ? getMeasuredLayoutWidth(agentPanel)
-    : historyPanel && historyPanel.hidden === false ? getMeasuredLayoutWidth(historyPanel) : 0;
-  const agentOpen = agentWidth > 0;
-  const totalWidth = Math.max(0, app.getBoundingClientRect().width - getMeasuredLayoutWidth(document.querySelector(".activity-rail")) - agentWidth);
+  const dockPanel = agentPanel?.hidden === false ? agentPanel : historyPanel?.hidden === false ? historyPanel : null;
+  const agentOpen = Boolean(dockPanel);
+  const availableWidth = Math.max(0, app.getBoundingClientRect().width - getMeasuredLayoutWidth(document.querySelector(".activity-rail")));
+  const sharedWidths = getPanelLayoutWidths(availableWidth, panelLayoutPreferences.sidebarWidth, panelLayoutPreferences.sftpWidth, panelLayoutPreferences.sidebarOpen, true);
   const activeSession = getActiveSession();
+  const activeGroup = activeSession && terminalGroups?.forSession(activeSession.id);
+  const split = activeGroup?.sessionIds.length === 2;
+  const paneShare = split && activeGroup.direction === "right"
+    ? activeGroup.sessionIds[0] === activeSession.id ? activeGroup.ratio : 1 - activeGroup.ratio : 1;
+  // Recover the pane's width before the dock shrinks the terminal workspace.
+  const focusedPaneWidth = split ? getMeasuredLayoutWidth(activeSession.container) + getMeasuredLayoutWidth(dockPanel) * paneShare
+    : availableWidth - sharedWidths.sidebarWidth;
+  const focusedWidths = getPanelLayoutWidths(focusedPaneWidth, 0, panelLayoutPreferences.sftpWidth, false, true);
+  const sidePanelWidth = Math.min(sharedWidths.sftpWidth, focusedWidths.sftpWidth || sharedWidths.sftpWidth);
+  app.style.setProperty("--side-panel-width", `${sidePanelWidth}px`);
+  [agentPanel, historyPanel].filter(Boolean).forEach(panel => {
+    panel.classList.toggle("side-panel-auto-collapsed", sidePanelWidth === 0);
+    panel.inert = panel.hidden || sidePanelWidth === 0;
+  });
+  const totalWidth = availableWidth - (agentOpen ? sidePanelWidth : 0);
   const sftpOpen = !agentOpen && activeSession?.kind === "ssh" && activeSession.sftpPanelOpen !== false;
   const widths = getPanelLayoutWidths(totalWidth, panelLayoutPreferences.sidebarWidth, panelLayoutPreferences.sftpWidth, panelLayoutPreferences.sidebarOpen, sftpOpen);
   app.style.setProperty("--sidebar-width", `${widths.sidebarWidth}px`);
@@ -1064,6 +1083,9 @@ function refreshPanelLayout() {
     sidebarToggle.setAttribute("aria-label", sidebarToggle.title);
   }
   updatePanelSeparator(document.getElementById("sidebar-resize-handle"), widths.sidebarWidth, PANEL_LAYOUT_LIMITS.sidebarMinimum, Math.min(PANEL_LAYOUT_LIMITS.sidebarMaximum, totalWidth - PANEL_LAYOUT_LIMITS.terminalMinimum - (sftpOpen && !widths.sftpAutoCollapsed ? PANEL_LAYOUT_LIMITS.sftpMinimum : 0)));
+  const sidePanelMaximum = Math.min(PANEL_LAYOUT_LIMITS.sftpMaximum, availableWidth - widths.sidebarWidth - PANEL_LAYOUT_LIMITS.terminalMinimum,
+    focusedWidths.sftpWidth > 0 ? focusedPaneWidth - PANEL_LAYOUT_LIMITS.terminalMinimum : PANEL_LAYOUT_LIMITS.sftpMaximum);
+  updatePanelSeparator(document.getElementById("side-panel-resize-handle"), agentOpen ? sidePanelWidth : 0, PANEL_LAYOUT_LIMITS.sftpMinimum, sidePanelMaximum);
   Object.values(activeSessions).forEach((session) => {
     if (!session.container || session.kind !== "ssh") return;
     const split = terminalGroups?.forSession(session.id)?.sessionIds.length === 2;
@@ -1143,6 +1165,11 @@ function initPanelLayout() {
   panelLayoutPreferences = readPanelLayoutPreferences();
   document.getElementById("btn-sidebar-toggle")?.addEventListener("click", toggleSidebarPanel);
   bindPanelResizeHandle(document.getElementById("sidebar-resize-handle"), "sidebar", () => document.querySelector(".sidebar").getBoundingClientRect().width);
+  bindPanelResizeHandle(document.getElementById("side-panel-resize-handle"), "sftp", () => {
+    const agentPanel = document.getElementById("automation-panel");
+    const historyPanel = document.getElementById("command-history-panel");
+    return getMeasuredLayoutWidth(agentPanel?.hidden === false ? agentPanel : historyPanel);
+  });
   window.addEventListener("resize", refreshPanelLayout);
   refreshPanelLayout();
 }
@@ -3509,9 +3536,10 @@ async function connectProfile(profile, workspaceState = null, paneDestination = 
     <aside class="sftp-panel" aria-label="Files on ${escapeHtml(profile.name)}">
       <div class="side-panel-header">
         <div class="side-panel-tabs" role="group" aria-label="Side panel">
-          <span class="side-panel-tab is-active" aria-current="true">${uiIcon("folder")}<span>Files</span></span>
-          <button class="side-panel-tab sftp-agent-tab" type="button" aria-pressed="false" title="Ask an agent to work on this server">${uiIcon("agentFull", "icon icon-agent")}<span>Agent</span><span class="attention-dot sftp-agent-attention" hidden></span></button>
+          <span class="side-panel-tab is-active" aria-current="true">Files</span>
+          <button class="side-panel-tab sftp-agent-tab" type="button" aria-pressed="false" title="Ask an agent to work on this server"><span>Agent</span><span class="attention-dot sftp-agent-attention" hidden></span></button>
           <button class="side-panel-tab sftp-history-tab" type="button" aria-pressed="false">History</button>
+          <button class="side-panel-tab sftp-snippets-tab" type="button" aria-pressed="false">Snippets</button>
         </div>
         <button class="icon-button sftp-close" type="button" title="Hide files" aria-label="Hide files">${uiIcon("close")}</button>
       </div>
@@ -4027,7 +4055,14 @@ function initSftpForSession(session) {
     activateSession(session.id, { focusTerminal: false });
     openAgentPanel();
   });
-  container.querySelector(".sftp-history-tab")?.addEventListener("click", () => window.SleekSshHistory?.controller?.open());
+  container.querySelector(".sftp-history-tab")?.addEventListener("click", () => {
+    activateSession(session.id, { focusTerminal: false });
+    window.SleekSshHistory?.controller?.open();
+  });
+  container.querySelector(".sftp-snippets-tab")?.addEventListener("click", () => {
+    activateSession(session.id, { focusTerminal: false });
+    window.SleekSshHistory?.controller?.openSnippets();
+  });
 
   const pathField = container.querySelector(".sftp-path");
   const setPathEditing = (editing) => {

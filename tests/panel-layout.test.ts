@@ -66,6 +66,11 @@ function createHarness(savedLayout?: string) {
   const body = createElement();
   const sidebarToggle = createElement();
   const sidebarHandle = createElement();
+  const sidePanelHandle = createElement();
+  const agentPanel = createElement(SFTP_DEFAULT);
+  const historyPanel = createElement(SFTP_DEFAULT);
+  agentPanel.hidden = true;
+  historyPanel.hidden = true;
   const notifications: string[] = [];
   const warnings: unknown[] = [];
   const fitted: string[] = [];
@@ -77,7 +82,8 @@ function createHarness(savedLayout?: string) {
     document: {
       body,
       querySelector: (selector: string) => ({ ".app-container": app, ".sidebar": sidebar }[selector]),
-      getElementById: (id: string) => ({ "btn-sidebar-toggle": sidebarToggle, "sidebar-resize-handle": sidebarHandle }[id])
+      getElementById: (id: string) => ({ "btn-sidebar-toggle": sidebarToggle, "sidebar-resize-handle": sidebarHandle,
+        "side-panel-resize-handle": sidePanelHandle, "automation-panel": agentPanel, "command-history-panel": historyPanel }[id])
     },
     window: { addEventListener() {} },
     localStorage: {
@@ -94,7 +100,8 @@ function createHarness(savedLayout?: string) {
     return JSON.parse(JSON.stringify(runInContext("getPanelLayoutWidths(total, sidebarWidth, sftpWidth, sidebarOpen, sftpOpen)", context)));
   };
   const preferences = () => JSON.parse(JSON.stringify(runInContext("panelLayoutPreferences", context)));
-  return { context, app, sidebar, body, sidebarToggle, sidebarHandle, storage, warnings, notifications, widths, preferences, terminalGroups, fitted };
+  return { context, app, sidebar, body, sidebarToggle, sidebarHandle, sidePanelHandle, agentPanel, historyPanel,
+    storage, warnings, notifications, widths, preferences, terminalGroups, fitted };
 }
 
 test("wide layouts use smaller default panels and preserve terminal space", () => {
@@ -106,6 +113,98 @@ test("wide layouts use smaller default panels and preserve terminal space", () =
     sidebarAutoCollapsed: false,
     sftpAutoCollapsed: false
   });
+});
+
+test("Files, Agent and the History/Snippets panel share every saved width", () => {
+  for (const savedWidth of [220, SFTP_DEFAULT, 420]) {
+    const h = createHarness(JSON.stringify({ sftpWidth: savedWidth }));
+    const files = createElement();
+    const handle = createElement();
+    const container = { ...createElement(), querySelector: (selector: string) => ({ ".sftp-panel": files, ".sftp-resize-handle": handle }[selector]) };
+    const session = { id: "ssh", kind: "ssh", sftpPanelOpen: true, container };
+    Object.assign(h.context, { activeSessions: { ssh: session }, activeTabId: "ssh" });
+    h.context.initPanelLayout();
+    assert.equal(container.style.getPropertyValue("--sftp-panel-width"), `${savedWidth}px`);
+    assert.equal(h.app.style.getPropertyValue("--side-panel-width"), `${savedWidth}px`);
+    for (const panel of [h.agentPanel, h.historyPanel]) {
+      panel.hidden = false;
+      h.context.refreshPanelLayout();
+      assert.equal(h.app.style.getPropertyValue("--side-panel-width"), `${savedWidth}px`);
+      assert.equal(h.sidePanelHandle.getAttribute("aria-valuenow"), String(savedWidth));
+      assert.equal(files.inert, true);
+      assert.equal(panel.inert, false);
+      panel.hidden = true;
+    }
+    h.context.refreshPanelLayout();
+    assert.equal(container.style.getPropertyValue("--sftp-panel-width"), `${savedWidth}px`);
+    assert.equal(files.inert, false);
+    assert.equal(h.sidePanelHandle.hidden, true);
+  }
+});
+
+test("resizing a docked panel persists the width used by other tabs", () => {
+  const h = createHarness();
+  h.agentPanel.hidden = false;
+  h.context.initPanelLayout();
+  h.sidePanelHandle.emit("keydown", { key: "ArrowLeft" });
+  const resized = SFTP_DEFAULT + KEYBOARD_STEP;
+  assert.equal(h.app.style.getPropertyValue("--side-panel-width"), `${resized}px`);
+  assert.equal(JSON.parse(h.storage.get(STORAGE_KEY)!).sftpWidth, resized);
+  h.agentPanel.hidden = true;
+  h.historyPanel.hidden = false;
+  h.context.refreshPanelLayout();
+  assert.equal(h.app.style.getPropertyValue("--side-panel-width"), `${resized}px`);
+});
+
+test("shared panels clamp and collapse together without losing the saved width", () => {
+  const h = createHarness(JSON.stringify({ sidebarWidth: 360, sftpWidth: 420 }));
+  h.app.measuredWidth = PANEL_MINIMUMS_WIDTH;
+  h.agentPanel.hidden = false;
+  h.context.initPanelLayout();
+  assert.equal(h.app.style.getPropertyValue("--side-panel-width"), "220px");
+  h.app.measuredWidth = NARROW_WINDOW;
+  h.context.refreshPanelLayout();
+  assert.equal(h.app.style.getPropertyValue("--side-panel-width"), "0px");
+  assert.equal(h.agentPanel.classList.contains("side-panel-auto-collapsed"), true);
+  assert.equal(h.agentPanel.inert, true);
+  assert.equal(h.sidePanelHandle.hidden, true);
+  h.app.measuredWidth = WIDE_WINDOW;
+  h.context.refreshPanelLayout();
+  assert.equal(h.app.style.getPropertyValue("--side-panel-width"), "420px");
+  assert.equal(h.agentPanel.classList.contains("side-panel-auto-collapsed"), false);
+  assert.equal(h.agentPanel.inert, false);
+  assert.equal(h.preferences().sftpWidth, 420);
+});
+
+test("switching panel tabs preserves the effective width in either split direction", () => {
+  const PANE_WIDTH = 560;
+  const EFFECTIVE_PANEL_WIDTH = PANE_WIDTH - TERMINAL_MINIMUM;
+  for (const direction of ["right", "below"] as const) {
+    const h = createHarness();
+    const files = createElement();
+    const handle = createElement();
+    const container = { ...createElement(PANE_WIDTH), querySelector: (selector: string) => ({ ".sftp-panel": files, ".sftp-resize-handle": handle }[selector]) };
+    const primary = { id: "ssh", kind: "ssh", sftpPanelOpen: true, container };
+    const secondary = { id: "local", kind: "local" };
+    h.terminalGroups.add(primary.id);
+    h.terminalGroups.add(secondary.id);
+    h.terminalGroups.split(primary.id, secondary.id, direction);
+    h.terminalGroups.focus(primary.id);
+    Object.assign(h.context, { activeSessions: { ssh: primary, local: secondary }, activeTabId: primary.id });
+    h.context.refreshPanelLayout();
+    assert.equal(container.style.getPropertyValue("--sftp-panel-width"), `${EFFECTIVE_PANEL_WIDTH}px`);
+    for (const panel of [h.agentPanel, h.historyPanel]) {
+      panel.hidden = false;
+      panel.measuredWidth = EFFECTIVE_PANEL_WIDTH;
+      container.measuredWidth = PANE_WIDTH - EFFECTIVE_PANEL_WIDTH * (direction === "right" ? 0.5 : 1);
+      h.context.refreshPanelLayout();
+      h.context.refreshPanelLayout();
+      assert.equal(h.app.style.getPropertyValue("--side-panel-width"), `${EFFECTIVE_PANEL_WIDTH}px`);
+      assert.equal(h.sidePanelHandle.getAttribute("aria-valuemax"), String(EFFECTIVE_PANEL_WIDTH));
+      panel.hidden = true;
+      container.measuredWidth = PANE_WIDTH;
+    }
+  }
 });
 
 test("panels clamp to their minimums before collapsing", () => {

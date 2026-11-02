@@ -28,6 +28,7 @@ async function harness(configuration: { listenFailure?: boolean; invoke?: (call:
   const storage = new Map<string, string>();
   const calls: Invocation[] = [];
   const errors: string[] = [];
+  const navigation: string[] = [];
   let events: ((event: { payload: unknown }) => void) | null = null;
   let unlistens = 0;
   let runNumber = 0;
@@ -48,7 +49,8 @@ async function harness(configuration: { listenFailure?: boolean; invoke?: (call:
       if (configuration.listenFailure) throw new Error("Event stream unavailable");
       events = callback; return () => { unlistens += 1; };
     },
-    onFiles() {}, onHistory() {}, onLayoutChange() {}, onError: message => { errors.push(message); },
+    onFiles() { navigation.push("files"); }, onHistory() { navigation.push("history"); },
+    onSnippets() { navigation.push("snippets"); }, onLayoutChange() {}, onError: message => { errors.push(message); },
   }, initAutomation);
   const control = <T extends HTMLElement>(key: string, name: string): T => {
     const element = document.querySelector<T>(`[data-session-key="${key}"] [data-automation-control="${name}"]`);
@@ -56,7 +58,7 @@ async function harness(configuration: { listenFailure?: boolean; invoke?: (call:
   };
   await settle();
   return {
-    agent, document, window, calls, errors, storage, targets, control,
+    agent, document, window, calls, errors, navigation, storage, targets, control,
     get focused() { return focused; }, get unlistens() { return unlistens; },
     view(key: string) { return document.querySelector<HTMLElement>(`[data-session-key="${key}"]`)!; },
     toggle() { document.getElementById("btn-automation-toggle")!.click(); },
@@ -92,6 +94,21 @@ test("SSH sessions retain independent drafts, open state and unique accessible c
     assert.ok(h.document.querySelector(`label[for="${prompt.id}"]`));
     await h.select(null); assert.equal(h.document.getElementById("automation-panel")!.hidden, true);
     assert.equal((h.document.getElementById("btn-automation-toggle") as HTMLButtonElement).disabled, true);
+  } finally { h.agent.dispose(); }
+});
+
+test("only the selected Agent session can navigate to the Snippets tab without stopping its task", async () => {
+  const h = await harness();
+  try {
+    h.toggle(); await h.task("a", "Task A"); await h.start("a");
+    h.control<HTMLButtonElement>("a", "automation-snippets-tab").click();
+    assert.deepEqual(h.navigation, ["snippets"]);
+    await h.select("b");
+    h.control<HTMLButtonElement>("a", "automation-snippets-tab").click();
+    assert.deepEqual(h.navigation, ["snippets"]);
+    h.control<HTMLButtonElement>("b", "automation-snippets-tab").click();
+    assert.deepEqual(h.navigation, ["snippets", "snippets"]);
+    assert.equal(h.calls.some(call => call.command === "stop_ssh_automation"), false);
   } finally { h.agent.dispose(); }
 });
 

@@ -25,7 +25,7 @@ export interface WorkspaceLayout {
   readonly sftpWidth: number;
   readonly sidebarOpen: boolean;
   readonly sidebarView: "connections" | "terminal" | "keys" | "vpn" | "workspaces";
-  readonly sidePanel: "none" | "files" | "history" | "agent";
+  readonly sidePanel: "none" | "files" | "history" | "agent" | "snippets";
 }
 
 export interface WorkspaceSnapshot {
@@ -58,7 +58,7 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const ABSOLUTE_DRIVE_PATH = /^[a-z]:[\\/]/i;
 const ABSOLUTE_NETWORK_PATH = /^(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/;
 const SIDEBAR_VIEWS = ["connections", "terminal", "keys", "vpn", "workspaces"] as const;
-const SIDE_PANELS = ["none", "files", "history", "agent"] as const;
+const SIDE_PANELS = ["none", "files", "history", "agent", "snippets"] as const;
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {

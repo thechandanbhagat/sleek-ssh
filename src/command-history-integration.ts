@@ -83,8 +83,8 @@ export function initCommandHistoryIntegration(options: IntegrationOptions) {
     const open = !root!.hidden;
     document.querySelector(".app-container")?.classList.toggle("history-open", open);
     document.querySelectorAll(".session-history-toggle, #btn-command-history-toggle").forEach(button => {
-      button.setAttribute("aria-expanded", String(open));
-      button.setAttribute("aria-pressed", String(open));
+      button.setAttribute("aria-expanded", String(open && !snippetView));
+      button.setAttribute("aria-pressed", String(open && !snippetView));
     });
     const files = document.getElementById("command-history-files-tab") as HTMLButtonElement | null;
     const agent = document.getElementById("command-history-agent-tab") as HTMLButtonElement | null;
@@ -96,9 +96,10 @@ export function initCommandHistoryIntegration(options: IntegrationOptions) {
 
   function setOpen(open: boolean, focus = true) {
     if (disposed || root!.hidden === !open) return;
+    // Agent refreshes can close this panel while the previous tab is still active.
+    if (open) options.closeAgent();
     root!.hidden = !open;
     if (!open) { snippets?.showLibrary(); snippetView = false; updateView(); }
-    if (open) options.closeAgent();
     refresh();
     options.onLayoutChange();
     if (focus) {
@@ -135,16 +136,28 @@ export function initCommandHistoryIntegration(options: IntegrationOptions) {
     const snippetRoot = document.getElementById("named-snippets-root");
     if (browser) browser.hidden = snippetView;
     if (snippetRoot) snippetRoot.hidden = !snippetView;
+    root!.dataset.view = snippetView ? "snippets" : "history";
+    root!.setAttribute("aria-labelledby", snippetView ? "command-history-view-snippets" : "command-history-title");
     document.getElementById("command-history-view-history")?.setAttribute("aria-pressed", String(!snippetView));
     document.getElementById("command-history-view-snippets")?.setAttribute("aria-pressed", String(snippetView));
+    document.getElementById("command-history-view-history")?.classList.toggle("is-active", !snippetView);
+    document.getElementById("command-history-view-snippets")?.classList.toggle("is-active", snippetView);
+    const close = document.getElementById("command-history-close");
+    const closeLabel = snippetView ? "Hide snippets" : "Hide command history";
+    close?.setAttribute("aria-label", closeLabel);
+    close?.setAttribute("title", closeLabel);
   }
   function selectView(showSnippets: boolean) {
     if (disposed) return;
+    const changed = snippetView !== showSnippets;
+    const wasOpen = !root!.hidden;
     snippetView = showSnippets;
     if (!showSnippets) snippets?.showLibrary();
     updateView();
     setOpen(true, false);
+    if (wasOpen && changed) { refresh(); options.onLayoutChange(); }
     if (showSnippets) snippets?.showLibrary();
+    else root!.querySelector<HTMLInputElement>("#command-history-search")?.focus();
   }
   const snippetRoot = document.getElementById("named-snippets-root");
   if (snippetRoot) snippets = initNamedSnippetsIntegration({
@@ -156,8 +169,9 @@ export function initCommandHistoryIntegration(options: IntegrationOptions) {
   });
   bind("command-history-view-history", () => selectView(false));
   bind("command-history-view-snippets", () => selectView(true));
-  bind("btn-command-history-toggle", () => setOpen(Boolean(root.hidden)));
-  bind("automation-history-tab", () => setOpen(true));
+  bind("btn-command-history-toggle", () => { if (!root.hidden && !snippetView) setOpen(false); else selectView(false); });
+  bind("automation-history-tab", () => selectView(false));
+  bind("automation-snippets-tab", () => selectView(true));
   bind("command-history-agent-tab", () => { setOpen(false, false); options.openAgent(); });
   bind("command-history-files-tab", () => { setOpen(false, false); options.openFiles(); });
 
@@ -219,7 +233,7 @@ export function initCommandHistoryIntegration(options: IntegrationOptions) {
   return {
     attachSession,
     refresh,
-    open() { setOpen(true); },
+    open() { selectView(false); },
     close() { setOpen(false, false); },
     listSnippets(session: HistorySession | null = options.getSession()) { return snippetsForFolder(loadSnippets(options.storage), snippetFolderForSession(session)); },
     openSnippets(id?: string) { selectView(true); if (id) snippets?.openSnippet(id); },

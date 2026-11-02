@@ -4,7 +4,6 @@
   --history-space-md: 12px;
   --history-space-lg: 16px;
   --history-control-height: 44px;
-  --history-view-height: 32px;
   --history-font-small: 12px;
   --history-font-command: 13px;
   --history-icon-size: 16px;
@@ -13,7 +12,7 @@
   display: flex;
   flex-direction: column;
   flex: none;
-  width: clamp(340px, 30vw, 440px);
+  width: var(--side-panel-width);
   min-width: 0;
   min-height: 0;
   background: var(--ink-2);
@@ -30,16 +29,6 @@
 }
 
 #command-history-browser[hidden], #named-snippets-root[hidden] { display: none; }
-.command-history-views {
-  display: flex;
-  gap: var(--history-space-xs);
-  margin: var(--history-space-sm) var(--history-space-md) 0;
-  padding: var(--history-space-xs);
-  border-radius: var(--radius);
-  background: var(--ink-1);
-}
-.command-history-views button { flex: 1; min-height: var(--history-view-height); background: transparent; border-color: transparent; }
-.command-history-views button[aria-pressed="true"] { color: var(--accent); background: var(--ink-3); }
 
 .command-history-context,
 .command-history-controls {

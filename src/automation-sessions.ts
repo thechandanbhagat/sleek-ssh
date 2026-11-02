@@ -16,6 +16,7 @@ export type AutomationSessionsOptions = Omit<CoreOptions, "getSelectedTarget" | 
   getTargetForSession: (key: string) => Target | null;
   onFiles: () => void;
   onHistory: () => void;
+  onSnippets: () => void;
   onError: (message: string) => void;
 }>;
 
@@ -128,6 +129,9 @@ export function initAutomationSessions(options: AutomationSessionsOptions, creat
     });
     controls.get("automation-history-tab")?.addEventListener("click", () => {
       if (!disposed && selectedKey === key && entries.has(key)) options.onHistory();
+    });
+    controls.get("automation-snippets-tab")?.addEventListener("click", () => {
+      if (!disposed && selectedKey === key && entries.has(key)) options.onSnippets();
     });
     let storage = options.storage;
     if (storage === undefined) {

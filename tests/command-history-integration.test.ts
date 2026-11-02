@@ -49,7 +49,47 @@ test("session palettes can list snippets and open the selected template for revi
   h.integration.dispose();
 });
 
-function createHarness(configuration: { initialStorage?: string; missingRoot?: boolean; noSession?: boolean; storageReadError?: Error } = {}) {
+test("Agent refreshes during a panel switch cannot hide History or reset Snippets", () => {
+  const h = createHarness({ reentrantAgentClose: true });
+  h.integration.openSnippets();
+  assert.equal(h.control("command-history-panel").hidden, false);
+  assert.equal(h.control("command-history-panel").dataset.view, "snippets");
+  h.integration.close();
+  h.integration.open();
+  assert.equal(h.control("command-history-panel").hidden, false);
+  assert.equal(h.control("command-history-panel").dataset.view, "history");
+  h.integration.dispose();
+});
+
+test("Snippets is a top-level panel tab and History navigation selects its own view", () => {
+  const h = createHarness();
+  const historyTab = h.control<HTMLButtonElement>("command-history-view-history");
+  const snippetTab = h.control<HTMLButtonElement>("command-history-view-snippets");
+  assert(historyTab.closest(".side-panel-header"));
+  assert.equal(historyTab.parentElement, snippetTab.parentElement);
+  assert.deepEqual([...historyTab.parentElement!.children].map(element => element.textContent), ["Files", "Agent", "History", "Snippets"]);
+  h.integration.open();
+  snippetTab.click();
+  assert.equal(h.control("command-history-panel").dataset.view, "snippets");
+  assert.equal(snippetTab.getAttribute("aria-pressed"), "true");
+  assert.equal(snippetTab.classList.contains("is-active"), true);
+  assert.equal(historyTab.getAttribute("aria-pressed"), "false");
+  assert.equal(h.control("command-history-panel").getAttribute("aria-labelledby"), snippetTab.id);
+  assert.equal(h.control("command-history-close").getAttribute("aria-label"), "Hide snippets");
+  assert.equal(h.control("btn-command-history-toggle").getAttribute("aria-expanded"), "false");
+  h.control<HTMLButtonElement>("btn-command-history-toggle").click();
+  assert.equal(h.control("command-history-panel").hidden, false);
+  assert.equal(h.control("command-history-panel").dataset.view, "history");
+  assert.equal(historyTab.getAttribute("aria-pressed"), "true");
+  assert.equal(snippetTab.classList.contains("is-active"), false);
+  h.integration.openSnippets();
+  h.integration.open();
+  assert.equal(h.control("named-snippets-root").hidden, true);
+  assert.equal(h.control("command-history-browser").hidden, false);
+  h.integration.dispose();
+});
+
+function createHarness(configuration: { initialStorage?: string; missingRoot?: boolean; noSession?: boolean; storageReadError?: Error; reentrantAgentClose?: boolean } = {}) {
   const { document, window } = parseHTML(MARKUP);
   if (configuration.missingRoot) document.getElementById("command-history-panel")?.remove();
   const values = new Map<string, string>();
@@ -159,7 +199,7 @@ function createHarness(configuration: { initialStorage?: string; missingRoot?: b
     sendText: (session, text) => { sent.push({ sessionId: session.id, text }); },
     writeSnippet: async (session, text) => { snippetWrites.push({ sessionId: session.id, text }); },
     onLayoutChange: () => { layoutChanges += 1; },
-    closeAgent: () => { closeAgentCount += 1; },
+    closeAgent: () => { closeAgentCount += 1; if (configuration.reentrantAgentClose) integration.close(); },
     openAgent: () => { openAgentCount += 1; },
     openFiles: () => { openFilesCount += 1; },
     onError: message => { errors.push(message); },

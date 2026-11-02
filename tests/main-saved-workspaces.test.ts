@@ -64,7 +64,8 @@ function createHarness(configuration: { invoke?: (call: Invocation) => Promise<u
       SleekSshPanes: { createTerminalGroups, initPaneDivider },
       SleekSshHistory: { controller: {
         close() { find("#command-history-panel").hidden = true; },
-        open() { find("#command-history-panel").hidden = false; runInContext("closeAgentPanel()", context); },
+        open() { find("#command-history-panel").hidden = false; find("#command-history-panel").dataset.view = "history"; runInContext("closeAgentPanel()", context); },
+        openSnippets() { find("#command-history-panel").hidden = false; find("#command-history-panel").dataset.view = "snippets"; runInContext("closeAgentPanel()", context); },
         refresh() {},
       } },
       addEventListener() {}, setTimeout: () => 1, clearTimeout() {},
@@ -161,7 +162,7 @@ test("main captures actual DOM tab order, duplicate hosts, local launch folders,
   assert.equal(JSON.stringify(snapshot).includes(PROFILE.password), false);
 });
 
-test("capture distinguishes Files, History, Agent and no panel", async () => {
+test("capture distinguishes Files, History, Agent, Snippets and no panel", async () => {
   const harness = createHarness();
   harness.setProfiles([PROFILE]);
   await harness.open({ ...SSH_TAB, sftpPanelOpen: true });
@@ -170,11 +171,13 @@ test("capture distinguishes Files, History, Agent and no panel", async () => {
   assert.equal(harness.capture().layout.sidePanel, "agent");
   harness.evaluate("window.SleekSshHistory.controller.open()");
   assert.equal(harness.capture().layout.sidePanel, "history");
+  harness.evaluate("window.SleekSshHistory.controller.openSnippets()");
+  assert.equal(harness.capture().layout.sidePanel, "snippets");
   harness.evaluate("window.SleekSshHistory.controller.close(); activeSessions[activeTabId].sftpPanelOpen = false");
   assert.equal(harness.capture().layout.sidePanel, "none");
 });
 
-for (const sidePanel of ["files", "history", "agent", "none"] as const) {
+for (const sidePanel of ["files", "history", "agent", "snippets", "none"] as const) {
   test("restoring " + sidePanel + " restores sidebar dimensions, active tab and exclusive panel visibility", async () => {
     const harness = createHarness();
     harness.setProfiles([PROFILE]);
@@ -188,7 +191,8 @@ for (const sidePanel of ["files", "history", "agent", "none"] as const) {
     assert.deepEqual(JSON.parse(harness.storage.get(LAYOUT_STORAGE_KEY)!), { sidebarWidth: layout.sidebarWidth, sftpWidth: layout.sftpWidth, sidebarOpen: layout.sidebarOpen });
     assert.equal(harness.find(".app-container").style.getPropertyValue("--sidebar-width"), layout.sidebarOpen ? String(layout.sidebarWidth) + "px" : "0px");
     assert.equal(harness.find("#automation-panel").hidden, sidePanel !== "agent");
-    assert.equal(harness.find("#command-history-panel").hidden, sidePanel !== "history");
+    assert.equal(harness.find("#command-history-panel").hidden, sidePanel !== "history" && sidePanel !== "snippets");
+    if (sidePanel === "history" || sidePanel === "snippets") assert.equal(harness.find("#command-history-panel").dataset.view, sidePanel);
     const session = harness.sessions.find(item => item.id === saved.sessionId)!;
     assert.equal(session.container.querySelector<HTMLElement>(".sftp-panel")!.inert, sidePanel !== "files");
     if (sidePanel === "files" || sidePanel === "none") {
