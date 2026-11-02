@@ -25,6 +25,7 @@ pub(crate) fn execute_sudo(
     cancelled: &AtomicBool,
     command: &str,
     password: impl FnMut() -> Result<Vec<u8>, String>,
+    on_started: impl FnOnce() -> Result<(), String>,
 ) -> Result<CommandOutput, String> {
     validate_command(command)?;
     let control = RunControl {
@@ -35,7 +36,14 @@ pub(crate) fn execute_sudo(
     let mut channel = retry_ssh(&control, "open sudo automation channel", || {
         with_session(session, &control, Session::channel_session)
     })?;
-    let result = execute_channel(session, &mut channel, &control, command, password);
+    let result = execute_channel(
+        session,
+        &mut channel,
+        &control,
+        command,
+        password,
+        on_started,
+    );
     let close_result = close_channel(session, &mut channel);
 
     // ssh2 frees channels without its internal session lock.
@@ -69,6 +77,7 @@ fn execute_channel(
     control: &RunControl<'_>,
     command: &str,
     password: impl FnMut() -> Result<Vec<u8>, String>,
+    on_started: impl FnOnce() -> Result<(), String>,
 ) -> Result<CommandOutput, String> {
     let markers = Markers::random()?;
     let script = sudo_script(command, &markers);
@@ -99,6 +108,7 @@ fn execute_channel(
             .map(|()| Ok(0)),
         },
         password,
+        on_started,
     )?;
     let channel = channel.into_inner();
     retry_ssh(control, "wait for sudo remote command exit", || {
@@ -234,6 +244,7 @@ fn collect_sudo_output(
     mut eof: impl FnMut() -> Result<bool, String>,
     mut input: impl FnMut(Input<'_>) -> Result<io::Result<usize>, String>,
     mut password: impl FnMut() -> Result<Vec<u8>, String>,
+    on_started: impl FnOnce() -> Result<(), String>,
 ) -> Result<(Vec<u8>, Vec<u8>, bool), String> {
     let mut stdout_gate = StreamGate::new(&markers.stdout, None);
     let mut stderr_gate = StreamGate::new(&markers.stderr, Some(&markers.prompt));
@@ -242,6 +253,7 @@ fn collect_sudo_output(
     let mut truncated = false;
     let mut password_sent = false;
     let mut input_closed = false;
+    let mut on_started = Some(on_started);
     let mut buffer = [0_u8; READ_BUFFER_BYTES];
     loop {
         control.check()?;
@@ -277,9 +289,16 @@ fn collect_sudo_output(
                         close_input(control, &mut input)?;
                         input_closed = true;
                     }
-                    GateEvent::Opened if !input_closed => {
-                        close_input(control, &mut input)?;
-                        input_closed = true;
+                    GateEvent::Opened => {
+                        if stdout_gate.opened && stderr_gate.opened {
+                            if let Some(started) = on_started.take() {
+                                started()?;
+                            }
+                        }
+                        if !input_closed {
+                            close_input(control, &mut input)?;
+                            input_closed = true;
+                        }
                     }
                     GateEvent::Output(byte) => {
                         if stdout.len() + stderr.len() == MAX_OUTPUT_BYTES {
@@ -291,7 +310,7 @@ fn collect_sudo_output(
                             }
                         }
                     }
-                    GateEvent::Suppressed | GateEvent::Opened => {}
+                    GateEvent::Suppressed => {}
                 }
             }
         }
@@ -369,6 +388,7 @@ mod tests {
         bytes: Vec<u8>,
         eof_count: usize,
         password_count: usize,
+        started_count: usize,
     }
 
     fn markers() -> Markers {
@@ -435,6 +455,10 @@ mod tests {
                 log.borrow_mut().password_count += 1;
                 credential.clone()
             },
+            || {
+                log.borrow_mut().started_count += 1;
+                Ok(())
+            },
         );
         (result, log.into_inner())
     }
@@ -445,9 +469,14 @@ mod tests {
         let clear = AtomicBool::new(false);
         let set = AtomicBool::new(true);
         for command in ["", " \r\n\t", "echo\0invalid"] {
-            assert!(execute_sudo(&session, &clear, &clear, command, || {
-                panic!("invalid commands must not read credentials")
-            })
+            assert!(execute_sudo(
+                &session,
+                &clear,
+                &clear,
+                command,
+                || { panic!("invalid commands must not read credentials") },
+                || panic!("invalid commands must not start")
+            )
             .is_err());
         }
         assert!(execute_sudo(
@@ -455,16 +484,22 @@ mod tests {
             &clear,
             &clear,
             &"x".repeat(super::super::MAX_COMMAND_BYTES + 1),
-            || panic!("oversized commands must not read credentials")
+            || panic!("oversized commands must not read credentials"),
+            || panic!("oversized commands must not start"),
         )
         .unwrap_err()
         .contains("limit"));
         for (disconnected, cancelled, expected) in
             [(&set, &clear, "disconnected"), (&clear, &set, "cancelled")]
         {
-            assert!(execute_sudo(&session, disconnected, cancelled, "id", || {
-                panic!("stopped commands must not read credentials")
-            })
+            assert!(execute_sudo(
+                &session,
+                disconnected,
+                cancelled,
+                "id",
+                || { panic!("stopped commands must not read credentials") },
+                || panic!("stopped commands must not start")
+            )
             .unwrap_err()
             .contains(expected));
         }
@@ -530,6 +565,87 @@ mod tests {
         assert_eq!(stdout, b"hello\n");
         assert_eq!(stderr, b"warning\n");
         assert_eq!(log.password_count, 0);
+        assert_eq!(log.started_count, 1);
+    }
+
+    #[test]
+    fn denied_or_failed_authentication_cannot_report_started_commands() {
+        let markers = markers();
+        for (stdout, stderr, credential) in [
+            (
+                vec![],
+                vec![markers.prompt.clone()],
+                Err("Denied".to_string()),
+            ),
+            (
+                vec![],
+                vec![b"authentication failure".to_vec()],
+                Ok(TEST_PASSWORD.to_vec()),
+            ),
+            (
+                vec![markers.stdout.clone()],
+                vec![],
+                Ok(TEST_PASSWORD.to_vec()),
+            ),
+            (
+                vec![],
+                vec![markers.stderr.clone()],
+                Ok(TEST_PASSWORD.to_vec()),
+            ),
+        ] {
+            let (result, log) = run_fixture(stdout, stderr, credential);
+            assert!(result.is_err());
+            assert_eq!(log.started_count, 0);
+        }
+    }
+
+    #[test]
+    fn sudo_started_notification_errors_propagate_and_later_cancellation_keeps_the_start() {
+        for cancel_after_start in [false, true] {
+            let markers = markers();
+            let cancelled = AtomicBool::new(false);
+            let disconnected = AtomicBool::new(false);
+            let run_control = RunControl {
+                disconnected: &disconnected,
+                cancelled: &cancelled,
+                deadline: Instant::now() + COMMAND_TIMEOUT,
+            };
+            let mut starts = 0;
+            let mut stdout = Some(markers.stdout.clone());
+            let mut stderr = Some(markers.stderr.clone());
+            let error = collect_sudo_output(
+                &run_control,
+                &markers,
+                |stream, buffer| {
+                    let bytes = match stream {
+                        OutputStream::Stdout => stdout.take(),
+                        OutputStream::Stderr => stderr.take(),
+                    }
+                    .unwrap_or_default();
+                    buffer[..bytes.len()].copy_from_slice(&bytes);
+                    Ok(Ok(bytes.len()))
+                },
+                || Ok(false),
+                |_| Ok(Ok(0)),
+                || panic!("authenticated payload must not need a password"),
+                || {
+                    starts += 1;
+                    if cancel_after_start {
+                        cancelled.store(true, Ordering::Relaxed);
+                        Ok(())
+                    } else {
+                        Err("Cannot deliver sudo started event".to_string())
+                    }
+                },
+            )
+            .unwrap_err();
+            assert_eq!(starts, 1);
+            if cancel_after_start {
+                assert!(error.contains("cancelled"));
+            } else {
+                assert_eq!(error, "Cannot deliver sudo started event");
+            }
+        }
     }
 
     #[test]
@@ -725,6 +841,7 @@ mod tests {
             || Ok(true),
             |_| Ok(Ok(0)),
             || panic!("passwordless fixture"),
+            || Ok(()),
         )
         .unwrap();
         assert_eq!(stdout, b"firstsecond");
@@ -805,6 +922,7 @@ mod tests {
             || panic!("expired commands must not inspect EOF"),
             |_| panic!("expired commands must not write"),
             || panic!("expired commands must not retrieve credentials"),
+            || panic!("expired commands must not start"),
         )
         .unwrap_err();
         assert!(error.contains("timed out"));
@@ -821,6 +939,7 @@ mod tests {
             || Ok(false),
             |_| panic!("failed reads must not write"),
             || panic!("failed reads must not retrieve credentials"),
+            || panic!("failed reads must not start"),
         )
         .unwrap_err();
         assert_eq!(error, "Failed to read sudo remote command output");
@@ -848,6 +967,7 @@ mod tests {
             || Ok(false),
             |_| panic!("cancelled run must not write"),
             || panic!("cancelled run must not retrieve password"),
+            || panic!("cancelled run must not start"),
         )
         .unwrap_err();
         assert!(error.contains("cancelled"));
@@ -871,6 +991,7 @@ mod tests {
                 flag.store(true, Ordering::Relaxed);
                 Ok(TEST_PASSWORD.to_vec())
             },
+            || panic!("cancelled authentication must not start the command"),
         )
         .unwrap_err();
         assert!(error.contains("cancelled"));

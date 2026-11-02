@@ -1,22 +1,25 @@
 import { renderAutomationMarkdown } from "./automation-markdown.ts";
+import { initAutomationSessions, type AutomationSessionsOptions } from "./automation-sessions.ts";
+import { createAutomationPromptQueue, renderAutomationPromptQueue, AUTOMATION_QUEUE_LIMITS, type PromptQueueContext, type QueuedAgentPrompt } from "./automation-prompt-queue.ts";
 
 type ProviderId = "claude" | "codex";
 type Provider = { id: ProviderId; name: string; available: boolean; executable?: string | null };
 type LocalChat = Readonly<{ id: string; title: string; project_path: string | null; updated_at: number | null }>;
 type LocalChatListing = Readonly<{ sessions: LocalChat[]; warnings: string[]; truncated: boolean }>;
-type Target = Readonly<{ sessionId: string; label: string; contextKey?: string }>;
+type Target = Readonly<{ sessionId: string; label: string; contextKey?: string; historyContextKey?: string }>;
 type Approval = Readonly<{ requestId: string; command: string }>;
 type SudoConsent = Approval & Readonly<{ message: string }>;
 type SudoResponse = Readonly<{ requestId: string; approved: boolean }>;
 type Run = Readonly<{ id: string; target: Target; provider: ProviderId; stopping: boolean }>;
 type EventTone = "ok" | "danger" | "muted";
 type OutputBlock = Readonly<{ id: number; format: "markdown" | "log" | "task" | "command" | "event"; text: string; agent?: string; command?: string; tone?: EventTone }>;
+type Transcript = Readonly<{ blocks: readonly OutputBlock[]; trimmed: boolean }>;
 type CommandState = Readonly<{ kind: "running" | "ok" | "failed" | "done" | "idle"; label: string }>;
 export type AutomationUiState = Readonly<{ open: boolean; running: boolean; review: boolean; targetSessionId: string | null }>;
 type AutomationEvent = {
   run_id: string;
   session_id: string;
-  kind: "status" | "output" | "command_output" | "approval" | "command" | "completed" | "failed" | "cancelled" | "session" | "sudo_approval" | "sudo_status" | "sudo_error";
+  kind: "status" | "output" | "command_output" | "command_executed" | "approval" | "command" | "completed" | "failed" | "cancelled" | "session" | "sudo_approval" | "sudo_status" | "sudo_error";
   message: string;
   request_id?: string;
   command?: string;
@@ -27,9 +30,12 @@ type AutomationOptions = {
   getSelectedTarget: () => Target | null;
   onLayoutChange: () => void;
   onStateChange?: (state: AutomationUiState) => void;
+  onCommandExecuted?: (target: Target, command: string) => void;
   document?: Document;
   createRunId?: () => string;
   storage?: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null;
+  getControl?: (id: string) => HTMLElement | null;
+  isVisible?: () => boolean;
 };
 
 const MAX_PROMPT_CHARACTERS = 16_000;
@@ -38,6 +44,10 @@ const MAX_OUTPUT_CHARACTERS = 200_000;
 const MAX_OUTPUT_BLOCKS = 200;
 const OUTPUT_TRIM_NOTICE = "[Earlier output trimmed]\n";
 const CONVERSATION_STORAGE_PREFIX = "sleekssh_automation_conversation:";
+const PROVIDER_STORAGE_KEY = "sleekssh_automation_provider";
+const TRANSCRIPT_STORAGE_PREFIX = "sleekssh_automation_transcript:";
+const TRANSCRIPT_VERSION = 1;
+const MAX_TRANSCRIPT_STORAGE_CHARACTERS = 2_000_000;
 const CONVERSATION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_VISIBLE_LOCAL_CHATS = 200;
 const MAX_CHAT_TITLE_CHARACTERS = 64;
@@ -64,10 +74,37 @@ const EVENT_ICONS: Readonly<Record<EventTone, string>> = {
 };
 const RUN_END_LABELS: Readonly<Record<string, string>> = { completed: "Run completed", failed: "Run failed", cancelled: "Run stopped" };
 const TERMINAL_EVENT_KINDS = new Set(["completed", "failed", "cancelled"]);
-const EVENT_KINDS = new Set(["status", "output", "command_output", "approval", "command", "session", "sudo_approval", "sudo_status", "sudo_error", ...TERMINAL_EVENT_KINDS]);
+const EVENT_KINDS = new Set(["status", "output", "command_output", "command_executed", "approval", "command", "session", "sudo_approval", "sudo_status", "sudo_error", ...TERMINAL_EVENT_KINDS]);
 
 function conversationStorageKey(target: Target, provider: string): string {
   return CONVERSATION_STORAGE_PREFIX + JSON.stringify([target.contextKey ?? target.sessionId, provider]);
+}
+
+function transcriptStorageKey(target: Target, provider: string, conversationId: string): string {
+  return TRANSCRIPT_STORAGE_PREFIX + JSON.stringify([target.contextKey ?? target.sessionId, provider, conversationId]);
+}
+
+function parseTranscript(raw: string): Transcript {
+  if (raw.length > MAX_TRANSCRIPT_STORAGE_CHARACTERS) throw new Error("Saved chat history is too large");
+  const value: unknown = JSON.parse(raw);
+  if (!value || typeof value !== "object") throw new Error("Invalid saved chat history");
+  const transcript = value as Record<string, unknown>;
+  if (transcript.version !== TRANSCRIPT_VERSION || typeof transcript.trimmed !== "boolean" || !Array.isArray(transcript.blocks)
+    || transcript.blocks.length > MAX_OUTPUT_BLOCKS) throw new Error("Invalid saved chat history");
+  const ids = new Set<number>();
+  const blocks = transcript.blocks.map((value: unknown): OutputBlock => {
+    if (!value || typeof value !== "object") throw new Error("Invalid saved chat message");
+    const block = value as Record<string, unknown>;
+    if (typeof block.id !== "number" || !Number.isSafeInteger(block.id) || block.id < 1 || block.id >= Number.MAX_SAFE_INTEGER - MAX_OUTPUT_BLOCKS || ids.has(block.id)
+      || typeof block.format !== "string" || !["markdown", "log", "task", "command", "event"].includes(block.format) || typeof block.text !== "string"
+      || (block.agent !== undefined && typeof block.agent !== "string")
+      || (block.command !== undefined && typeof block.command !== "string")
+      || (block.tone !== undefined && (typeof block.tone !== "string" || !["ok", "danger", "muted"].includes(block.tone)))) throw new Error("Invalid saved chat message");
+    ids.add(block.id);
+    return { id: block.id, format: block.format as OutputBlock["format"], text: block.text,
+      agent: block.agent as string | undefined, command: block.command as string | undefined, tone: block.tone as EventTone | undefined };
+  });
+  return { blocks, trimmed: transcript.trimmed };
 }
 
 function parseLocalChats(value: unknown): LocalChatListing {
@@ -147,8 +184,12 @@ function parseEvent(payload: unknown): AutomationEvent | null {
   const event = payload as Record<string, unknown>;
   if (typeof event.run_id !== "string" || typeof event.session_id !== "string"
     || typeof event.kind !== "string" || !EVENT_KINDS.has(event.kind) || typeof event.message !== "string") return null;
+  if ((event.request_id !== undefined && typeof event.request_id !== "string")
+    || (event.command !== undefined && typeof event.command !== "string")) return null;
   if (event.kind === "approval" && (typeof event.request_id !== "string" || !event.request_id
     || typeof event.command !== "string" || !event.command)) return null;
+  if (event.kind === "command_executed" && (typeof event.request_id !== "string" || !event.request_id
+    || typeof event.command !== "string" || !event.command.trim())) return null;
   if ((event.kind === "sudo_approval" || event.kind === "sudo_status")
     && (typeof event.request_id !== "string" || !event.request_id.trim())) return null;
   if (event.kind === "sudo_approval" && (typeof event.command !== "string" || !event.command.trim() || !event.message.trim())) return null;
@@ -159,13 +200,18 @@ function parseEvent(payload: unknown): AutomationEvent | null {
 
 export function initAutomation(options: AutomationOptions) {
   const document_ = options.document ?? document;
+  const findControl = options.getControl ?? ((id: string) => document_.getElementById(id));
   const element = <T extends HTMLElement>(id: string): T => {
-    const found = document_.getElementById(id);
+    const found = findControl(id);
     if (!found) throw new Error(`SSH automation control is missing: ${id}`);
     return found as T;
   };
   const panel = element("automation-panel");
   const toggle = element<HTMLButtonElement>("btn-automation-toggle");
+  const activity = document_.createElement("span");
+  activity.className = "automation-toggle-progress";
+  activity.setAttribute("role", "progressbar");
+  activity.setAttribute("aria-label", "Agent running");
   const providerSelect = element<HTMLSelectElement>("automation-provider");
   const conversation = element<HTMLInputElement>("automation-conversation");
   const newChatButton = element<HTMLButtonElement>("automation-new-chat");
@@ -176,6 +222,10 @@ export function initAutomation(options: AutomationOptions) {
   const prompt = element<HTMLTextAreaElement>("automation-prompt");
   const startButton = element<HTMLButtonElement>("automation-start");
   const stopButton = element<HTMLButtonElement>("automation-stop");
+  const steerButton = element<HTMLButtonElement>("automation-steer");
+  const queuePanel = element("automation-queue");
+  const queueList = element("automation-queue-list");
+  const queueCount = element("automation-queue-count");
   const refreshButton = element<HTMLButtonElement>("automation-refresh");
   const approvalPanel = element("automation-approval");
   const approveButton = element<HTMLButtonElement>("automation-approve");
@@ -189,14 +239,19 @@ export function initAutomation(options: AutomationOptions) {
   const sudoRequestMessage = element("automation-sudo-message");
   const output = element("automation-output");
   const status = element("automation-status");
-  const approvalExpiry = document_.getElementById("automation-approval-expiry");
-  const sudoExpiry = document_.getElementById("automation-sudo-expiry");
+  const approvalExpiry = findControl("automation-approval-expiry");
+  const sudoExpiry = findControl("automation-sudo-expiry");
   const bindings: Array<() => void> = [];
   const approvalReceivedAt = new Map<string, number>();
   let sudoConsentReceivedAt: number | null = null;
   let countdownTimer: ReturnType<typeof setInterval> | null = null;
   let providers: Provider[] = [];
   let run: Run | null = null;
+  const promptQueue = createAutomationPromptQueue();
+  let queueSignature = "";
+  let queuePendingId: number | null = null;
+  let launching: { id: string; finished: boolean } | null = null;
+  let steeringRunId: string | null = null;
   let approvals: Approval[] = [];
   let approvalInFlight: string | null = null;
   let sudoConsent: SudoConsent | null = null;
@@ -213,13 +268,22 @@ export function initAutomation(options: AutomationOptions) {
   let outputBlocks: readonly OutputBlock[] = [];
   let outputTrimmed = false;
   let nextBlockId = 1;
+  let runStartBlockId = 1;
+  let pendingHistoryCommand: string | null = null;
+  const recordedHistoryCommands = new Set<string>();
   const collapsedBlocks = new Set<number>();
   let statusMessage = "";
   let statusError = false;
   let conversationError = "";
   let displayedConversationKey: string | null | undefined;
   const conversationDrafts = new Map<string, string>();
+  const transcripts = new Map<string, Transcript>();
+  let displayedTranscriptKey: string | null | undefined;
+  let historyError = "";
+  let historyRequest = 0;
+  let historyLoading = false;
   const localChats = new Map<ProviderId, LocalChatListing>();
+  const loadedChatProviders = new Set<ProviderId>();
   const localChatErrors = new Map<ProviderId, string>();
   let chatsRequest = 0;
   let chatsLoadingProvider: ProviderId | null = null;
@@ -232,6 +296,16 @@ export function initAutomation(options: AutomationOptions) {
   if (options.storage === undefined && typeof window !== "undefined") {
     try { storage = window.localStorage; }
     catch (error) { storageAccessError = `Local chat context is unavailable: ${String(error)}. Enter a conversation ID manually.`; }
+  }
+  try {
+    const savedProvider = storage?.getItem(PROVIDER_STORAGE_KEY);
+    if (savedProvider !== null && savedProvider !== undefined) {
+      if (!EXPECTED_PROVIDER_IDS.includes(savedProvider as ProviderId)) throw new Error("Invalid saved local agent");
+      providerSelect.value = savedProvider;
+    }
+  } catch (error) {
+    statusMessage = `Could not restore the selected local agent: ${String(error)}. Choose Claude Code or Codex.`;
+    statusError = true;
   }
 
   function syncConversation(target: Target | null) {
@@ -258,9 +332,95 @@ export function initAutomation(options: AutomationOptions) {
     }
   }
 
+  function saveConversation(target: Target, provider: ProviderId, id: string) {
+    const key = conversationStorageKey(target, provider);
+    conversationDrafts.set(key, id);
+    try {
+      if (id) storage?.setItem(key, JSON.stringify(id));
+      else storage?.removeItem(key);
+      conversationError = "";
+    } catch (error) {
+      conversationError = `Could not save this chat context: ${String(error)}. Copy the conversation ID to reuse it.`;
+    }
+  }
+
+  function saveTranscript() {
+    if (!displayedTranscriptKey) return;
+    const transcript: Transcript = { blocks: outputBlocks, trimmed: outputTrimmed };
+    transcripts.set(displayedTranscriptKey, transcript);
+    try {
+      storage?.setItem(displayedTranscriptKey, JSON.stringify({ version: TRANSCRIPT_VERSION, ...transcript }));
+      historyError = "";
+    } catch (error) {
+      historyError = `Could not save chat history: ${String(error)}. Keep this window open to retain the transcript.`;
+    }
+  }
+
+  function syncTranscript(target: Target | null) {
+    if (run) return;
+    const id = conversation.value.trim();
+    const provider = providerSelect.value as ProviderId;
+    const key = target ? transcriptStorageKey(target, provider, id) : null;
+    if (displayedTranscriptKey === key) return;
+    displayedTranscriptKey = key;
+    historyRequest += 1;
+    historyLoading = false;
+    historyError = "";
+    outputTrimmed = false;
+    collapsedBlocks.clear();
+    let transcript = key ? transcripts.get(key) : undefined;
+    if (key && !transcript) {
+      try {
+        const raw = storage?.getItem(key);
+        if (raw !== null && raw !== undefined) transcript = parseTranscript(raw);
+      } catch (error) {
+        historyError = `Could not load saved chat history: ${String(error)}. Reopen the chat to retry.`;
+      }
+    }
+    outputTrimmed = transcript?.trimmed ?? false;
+    nextBlockId = Math.max(0, ...(transcript?.blocks ?? []).map(block => block.id)) + 1;
+    pushOutputBlocks([...(transcript?.blocks ?? [])], true, false);
+    if (target && key && id && CONVERSATION_ID_PATTERN.test(id) && !transcript) {
+      void loadHistory(provider, id, key, historyRequest);
+    }
+  }
+
+  async function loadHistory(provider: ProviderId, id: string, key: string, request: number) {
+    historyLoading = true;
+    try {
+      const result = await options.invoke("get_local_agent_history", { provider, sessionId: id });
+      if (disposed || displayedTranscriptKey !== key || request !== historyRequest || run) return;
+      if (!result || typeof result !== "object") throw new Error("Invalid conversation history");
+      const history = result as Record<string, unknown>;
+      if (!Array.isArray(history.messages) || history.messages.length > MAX_OUTPUT_BLOCKS || typeof history.truncated !== "boolean") {
+        throw new Error("Invalid conversation history");
+      }
+      const blocks = history.messages.map((value: unknown): OutputBlock => {
+        if (!value || typeof value !== "object") throw new Error("Invalid conversation message");
+        const message = value as Record<string, unknown>;
+        if ((message.role !== "user" && message.role !== "assistant") || typeof message.text !== "string") throw new Error("Invalid conversation message");
+        return { id: nextBlockId++, format: message.role === "user" ? "task" : "markdown", text: message.text,
+          agent: message.role === "assistant" ? providerName(provider) : undefined };
+      });
+      outputTrimmed = history.truncated;
+      pushOutputBlocks(blocks, true);
+    } catch (error) {
+      if (!disposed && displayedTranscriptKey === key && request === historyRequest) {
+        historyError = `Could not load conversation history: ${String(error)}. Reopen the chat to retry.`;
+      }
+    } finally {
+      if (!disposed && displayedTranscriptKey === key && request === historyRequest) {
+        historyLoading = false;
+        render();
+      }
+    }
+  }
+
   function render() {
     const selectedTarget = options.getSelectedTarget();
+    const queued = promptQueue.state();
     syncConversation(selectedTarget);
+    syncTranscript(selectedTarget);
     const provider = providers.find(candidate => candidate.id === providerSelect.value);
     const approval = approvals[0];
     panel.dataset.running = String(Boolean(run));
@@ -278,19 +438,39 @@ export function initAutomation(options: AutomationOptions) {
     const conversationId = conversation.value.trim();
     renderLocalChats(conversationId, selectedTarget);
     const validConversation = !conversationId || CONVERSATION_ID_PATTERN.test(conversationId);
-    startButton.disabled = !listenerReady || providersBusy || !selectedTarget || !provider?.available || !validPrompt || !validConversation || Boolean(conversationError) || Boolean(run);
-    conversation.disabled = Boolean(run) || !selectedTarget;
-    newChatButton.disabled = Boolean(run) || !selectedTarget;
+    startButton.disabled = !listenerReady || providersBusy || historyLoading || !selectedTarget || !provider?.available || !validPrompt || !validConversation
+      || Boolean(conversationError) || Boolean(run?.stopping) || Boolean(launching && !run) || queued.prompts.length >= AUTOMATION_QUEUE_LIMITS.prompts;
+    startButton.textContent = run || queued.prompts.length ? "Queue prompt" : conversationId ? "Send follow-up" : "Run task";
+    conversation.disabled = Boolean(run) || !selectedTarget || (queued.prompts.length > 0 && !queued.paused);
+    newChatButton.disabled = Boolean(run) || !selectedTarget || queued.prompts.length > 0;
     conversationHelp.textContent = conversationError || (!validConversation ? "Enter a complete conversation UUID, or choose New chat."
       : conversationId ? "The next task continues this saved, idle chat on this server." : "Use a saved, idle chat; leave blank to start one.");
     conversationHelp.dataset.error = String(Boolean(conversationError) || !validConversation);
     conversation.setAttribute("aria-invalid", String(!validConversation));
-    providerSelect.disabled = Boolean(run);
-    prompt.disabled = Boolean(run);
-    refreshButton.disabled = providersBusy || Boolean(run);
+    providerSelect.disabled = Boolean(run) || queued.prompts.length > 0;
+    prompt.disabled = false;
+    prompt.placeholder = "Message the agent…";
+    startButton.title = `${startButton.textContent} (Enter)`;
+    refreshButton.disabled = providersBusy || Boolean(run) || queued.prompts.length > 0;
     stopButton.disabled = !run || run.stopping;
     stopButton.textContent = run?.stopping ? "Stopping…" : "Stop";
-    element("automation-stop-help").hidden = !run;
+    steerButton.hidden = !run || !validPrompt;
+    steerButton.disabled = startButton.disabled || !run || run.stopping || Boolean(launching) || !CONVERSATION_ID_PATTERN.test(conversationId) || queued.prompts.length >= AUTOMATION_QUEUE_LIMITS.prompts;
+    queuePanel.hidden = !queued.prompts.length;
+    queueCount.textContent = `${queued.prompts.length}${queued.paused ? " · paused" : ""}`;
+    const queueToggleDisabled = Boolean(run?.stopping) || (queued.paused && (Boolean(launching) || !selectedTarget || !CONVERSATION_ID_PATTERN.test(conversationId)));
+    const canSteerQueued = Boolean(run && !run.stopping && !launching && !queuePendingId && selectedTarget?.sessionId === run.target.sessionId
+      && CONVERSATION_ID_PATTERN.test(conversationId) && !conversationError);
+    const nextQueueSignature = JSON.stringify([queued.prompts, queuePendingId, queued.paused, queueToggleDisabled, canSteerQueued]);
+    if (queueSignature !== nextQueueSignature) {
+      queueSignature = nextQueueSignature;
+      renderAutomationPromptQueue({ root: queueList, prompts: queued.prompts, pendingId: queuePendingId, paused: queued.paused, canSteer: canSteerQueued, toggleDisabled: queueToggleDisabled,
+        remove: id => { if (!disposed && options.isVisible?.() !== false && id !== queuePendingId) { promptQueue.remove(id); render(); prompt.focus(); } },
+        moveEarlier: id => { if (!disposed && options.isVisible?.() !== false && !queuePendingId) { promptQueue.moveEarlier(id); render(); prompt.focus(); } },
+        steer: id => { if (canSteerQueued) void steerQueuedPrompt(id); },
+        togglePause: () => { if (!queueToggleDisabled) void togglePromptQueue(); },
+      });
+    }
     element("automation-provider-help").hidden = Boolean(run);
     approvalPanel.hidden = !approval || !run;
     approveButton.disabled = Boolean(approvalInFlight) || Boolean(run?.stopping);
@@ -308,8 +488,13 @@ export function initAutomation(options: AutomationOptions) {
     sudoStatus.dataset.error = String(sudoMessageError);
     status.textContent = statusMessage || (selectedTarget ? "Describe a task. Each remote command needs your approval." : "Select a connected SSH server to begin.");
     status.dataset.error = String(statusError);
+    status.className = statusError ? "automation-status" : "automation-status sr-only";
     const needsReview = Boolean(run && (approval || sudoConsent));
-    toggle.textContent = needsReview ? "Approval needed" : run ? "Agent running" : "Agent idle";
+    const toggleLabel = needsReview ? "Approval needed" : run ? "Agent running" : "Agent idle";
+    if (run && !needsReview) { if (toggle.children[0] !== activity) toggle.replaceChildren(activity); }
+    else toggle.textContent = toggleLabel;
+    toggle.setAttribute("aria-label", toggleLabel);
+    toggle.setAttribute("title", toggleLabel);
     toggle.dataset.state = needsReview ? "review" : run ? "running" : "idle";
     syncCountdown();
     notifyState();
@@ -374,7 +559,7 @@ export function initAutomation(options: AutomationOptions) {
     const listing = localChats.get(provider);
     const error = localChatErrors.get(provider);
     const loading = chatsLoadingProvider === provider;
-    chatSelect.disabled = Boolean(run) || !target;
+    chatSelect.disabled = Boolean(run) || !target || (promptQueue.state().prompts.length > 0 && !promptQueue.state().paused);
     refreshChatsButton.disabled = Boolean(run) || loading;
     chatHelp.textContent = error || (loading ? "Loading saved local chats…" : !listing ? "Open automation to load saved local chats."
       : !listing.sessions.length ? "No saved local chats found. Choose New chat or use Advanced."
@@ -384,9 +569,11 @@ export function initAutomation(options: AutomationOptions) {
       chatHelp.textContent += [listing.truncated ? "Recent chats shown; use Advanced for another ID." : "", ...warnings].filter(Boolean).map(message => ` ${message}`).join("");
     }
     if (conversationError) chatHelp.textContent += ` ${conversationError}`;
-    chatHelp.dataset.error = String(Boolean(error) || Boolean(conversationError));
+    if (historyLoading) chatHelp.textContent += " Loading conversation history…";
+    if (historyError) chatHelp.textContent += ` ${historyError}`;
+    chatHelp.dataset.error = String(Boolean(error) || Boolean(conversationError) || Boolean(historyError));
     // A bare "N saved chats" count repeats what the picker shows, so the panel can hide it.
-    chatHelp.dataset.quiet = String(Boolean(listing && !error && !loading && !conversationError && listing.sessions.length
+    chatHelp.dataset.quiet = String(Boolean(listing && !error && !loading && !conversationError && !historyError && !historyLoading && listing.sessions.length
       && !listing.truncated && !listing.warnings.length));
     if (renderedChatProvider === provider && renderedChatListing === listing && renderedChatSelection === conversationId) return;
     renderedChatProvider = provider;
@@ -408,7 +595,7 @@ export function initAutomation(options: AutomationOptions) {
   async function loadLocalChats(refresh = false) {
     if (disposed || run) return;
     const provider = providerSelect.value as ProviderId;
-    if (chatsLoadingProvider === provider || (!refresh && localChats.has(provider))) return;
+    if (chatsLoadingProvider === provider || (!refresh && loadedChatProviders.has(provider))) return;
     const request = ++chatsRequest;
     chatsLoadingProvider = provider;
     localChatErrors.delete(provider);
@@ -417,6 +604,7 @@ export function initAutomation(options: AutomationOptions) {
       const listing = parseLocalChats(await options.invoke("list_local_agent_sessions", { provider }));
       if (disposed || request !== chatsRequest || providerSelect.value !== provider) return;
       localChats.set(provider, listing);
+      loadedChatProviders.add(provider);
     } catch (error) {
       if (!disposed && request === chatsRequest && providerSelect.value === provider) {
         localChatErrors.set(provider, `Could not load local chats: ${String(error)}. Retry Refresh chats, choose New chat, or use Advanced.`);
@@ -461,7 +649,7 @@ export function initAutomation(options: AutomationOptions) {
   // Output belongs to the command card it answers; anything else stays a plain log block.
   function appendCommandOutput(message: string) {
     if (!message) return;
-    const previous = outputBlocks.filter(block => block.format === "command").at(-1);
+    const previous = outputBlocks.filter(block => block.format === "command" && block.id >= runStartBlockId).at(-1);
     if (!previous) {
       appendOutput(message);
       return;
@@ -527,7 +715,7 @@ export function initAutomation(options: AutomationOptions) {
     if (thread) thread.scrollTop = thread.scrollHeight;
   }
 
-  function pushOutputBlocks(blocks: OutputBlock[], forceScroll = false) {
+  function pushOutputBlocks(blocks: OutputBlock[], forceScroll = false, persist = true) {
     const thread = threadElement();
     const follow = forceScroll || !thread || thread.scrollHeight - thread.scrollTop - thread.clientHeight < THREAD_FOLLOW_THRESHOLD_PX;
     const characters = blocks.reduce((total, block) => total + block.text.length, 0);
@@ -541,7 +729,8 @@ export function initAutomation(options: AutomationOptions) {
       remaining -= text.length;
     }
     outputBlocks = retained.reverse();
-    const latestCommand = outputBlocks.filter(block => block.format === "command").at(-1);
+    if (persist) saveTranscript();
+    const latestCommand = outputBlocks.filter(block => block.format === "command" && (!run || block.id >= runStartBlockId)).at(-1);
     const nodes = outputBlocks.map(block => renderOutputBlock(block, block.id === latestCommand?.id));
     if (outputTrimmed) {
       const notice = document_.createElement("pre");
@@ -549,22 +738,37 @@ export function initAutomation(options: AutomationOptions) {
       notice.textContent = OUTPUT_TRIM_NOTICE;
       nodes.unshift(notice);
     }
+    if (!nodes.length) {
+      const empty = document_.createElement("p");
+      empty.className = "automation-empty";
+      empty.textContent = "Describe a task below. The agent proposes remote commands, and nothing runs until you approve it.";
+      nodes.push(empty);
+    }
     output.replaceChildren(...nodes);
     output.scrollTop = output.scrollHeight;
     if (thread && follow) thread.scrollTop = thread.scrollHeight;
+    if (persist) renderLocalChats(conversation.value.trim(), run?.target ?? options.getSelectedTarget());
   }
 
   function setOpen(open: boolean, focus = false) {
+    if (open && options.isVisible?.() === false) { render(); return; }
     panel.hidden = !open;
     toggle.setAttribute("aria-expanded", String(open));
     notifyState();
     options.onLayoutChange();
     if (open) {
       panelOpened = true;
+      retryHistory();
       void loadLocalChats();
     }
     if (focus) (open ? run ? sudoConsent && !sudoInFlight && !run.stopping ? sudoAllowButton
       : approvals.length && !approvalInFlight && !run.stopping ? approveButton : stopButton : prompt : toggle).focus();
+  }
+
+  function retryHistory() {
+    if (run || historyLoading || !historyError || !displayedTranscriptKey || transcripts.has(displayedTranscriptKey)) return;
+    displayedTranscriptKey = undefined;
+    render();
   }
 
   function resetSudoConsent() {
@@ -577,6 +781,14 @@ export function initAutomation(options: AutomationOptions) {
     seenSudoRequests.clear();
   }
 
+  function recordExecutedCommand(command: string | null, executionId?: string) {
+    if (!run || !command || (executionId && recordedHistoryCommands.has(executionId))) return;
+    pendingHistoryCommand = null;
+    if (executionId) recordedHistoryCommands.add(executionId);
+    try { options.onCommandExecuted?.(run.target, command); }
+    catch (error) { setStatus(`Could not save command history: ${String(error)}`, true); }
+  }
+
   function handleEvent(payload: unknown) {
     const event = parseEvent(payload);
     if (disposed || !event || !run || event.run_id !== run.id || event.session_id !== run.target.sessionId) return;
@@ -585,11 +797,34 @@ export function initAutomation(options: AutomationOptions) {
         setStatus("The local agent returned an invalid conversation ID. This chat context was not saved.", true);
         return;
       }
-      const key = conversationStorageKey(run.target, run.provider);
+      const previousKey = displayedTranscriptKey;
+      const wasNew = !conversation.value.trim();
+      displayedTranscriptKey = transcriptStorageKey(run.target, run.provider, event.message);
       conversation.value = event.message;
-      conversationDrafts.set(key, event.message);
-      try { storage?.setItem(key, JSON.stringify(event.message)); conversationError = storageAccessError; }
-      catch (error) { conversationError = `Could not save this chat context: ${String(error)}. Copy the conversation ID to reuse it.`; }
+      saveConversation(run.target, run.provider, event.message);
+      // An older metadata scan may predate the chat the CLI just created.
+      if (chatsLoadingProvider === run.provider) {
+        chatsRequest += 1;
+        chatsLoadingProvider = null;
+      }
+      const listing = localChats.get(run.provider);
+      const existing = listing?.sessions.find(chat => chat.id === event.message);
+      const chat: LocalChat = {
+        id: event.message,
+        title: existing?.title ?? boundedChatText(outputBlocks.find(block => block.format === "task")?.text ?? "", MAX_CHAT_TITLE_CHARACTERS),
+        project_path: existing?.project_path ?? null,
+        updated_at: Date.now(),
+      };
+      localChats.set(run.provider, {
+        sessions: [chat, ...(listing?.sessions ?? []).filter(chat => chat.id !== event.message)].slice(0, MAX_VISIBLE_LOCAL_CHATS),
+        warnings: listing?.warnings ?? [],
+        truncated: listing?.truncated ?? false,
+      });
+      if (wasNew && previousKey && previousKey !== displayedTranscriptKey) {
+        transcripts.delete(previousKey);
+        try { storage?.removeItem(previousKey); }
+        catch (error) { historyError = `Could not clear the new-chat draft: ${String(error)}`; }
+      }
       appendEvent("Conversation ID:", "muted", event.message);
       render();
     } else if (event.kind === "sudo_approval") {
@@ -600,7 +835,7 @@ export function initAutomation(options: AutomationOptions) {
       setStatus("Sudo needs permission to use this server's saved password. Remote commands still require approval.");
       setOpen(true);
       scrollThreadToEnd();
-      sudoAllowButton.focus();
+      if (options.isVisible?.() !== false) sudoAllowButton.focus();
     } else if (event.kind === "sudo_status") {
       if (!sudoInFlight?.approved || event.request_id !== sudoInFlight.requestId) return;
       sudoConsent = null;
@@ -628,30 +863,42 @@ export function initAutomation(options: AutomationOptions) {
       scrollThreadToEnd();
     } else if (event.kind === "output") {
       appendOutput(event.message, "markdown");
+    } else if (event.kind === "command_executed") {
+      recordExecutedCommand(event.command!, event.request_id);
     } else if (event.kind === "command_output") {
       appendCommandOutput(event.message);
+      if (event.message.match(EXIT_STATUS_PATTERN)?.length) recordExecutedCommand(event.command ?? pendingHistoryCommand, event.request_id);
     } else if (TERMINAL_EVENT_KINDS.has(event.kind)) {
       const label = RUN_END_LABELS[event.kind];
+      const steered = steeringRunId === run.id;
+      if (launching?.id === run.id) launching.finished = true;
+      if (!steered && (event.kind !== "completed" || run.stopping)) promptQueue.pause();
+      steeringRunId = null;
       run = null;
+      pendingHistoryCommand = null;
       appendEvent(event.message.trim() ? `${label}. ${event.message.trim()}` : `${label}.`, event.kind === "completed" ? "ok" : event.kind === "failed" ? "danger" : "muted");
       approvals = [];
       approvalReceivedAt.clear();
       approvalInFlight = null;
       resetSudoConsent();
       setStatus(event.message || `Automation ${event.kind}.`, event.kind === "failed");
+      void drainPromptQueue();
     } else {
       if (event.kind === "status" && event.request_id) {
         approvals = approvals.filter(approval => approval.requestId !== event.request_id);
         approvalReceivedAt.delete(event.request_id);
         if (approvalInFlight === event.request_id) approvalInFlight = null;
       }
-      if (event.kind === "command") appendCommand(event.command ?? event.message);
+      if (event.kind === "command") {
+        pendingHistoryCommand = event.command ?? event.message;
+        appendCommand(pendingHistoryCommand);
+      }
       setStatus(event.message);
     }
   }
 
   async function refreshProviders() {
-    if (providersBusy || run || disposed) return;
+    if (providersBusy || run || disposed || promptQueue.state().prompts.length) return;
     providersBusy = true;
     render();
     try {
@@ -682,51 +929,135 @@ export function initAutomation(options: AutomationOptions) {
 
   async function startRun(event: Event) {
     event.preventDefault();
+    if (options.isVisible?.() === false) return;
     render();
     if (startButton.disabled || disposed) return;
     const target = options.getSelectedTarget();
     if (!target) return;
+    if (run || promptQueue.state().prompts.length) {
+      try {
+        if (run && run.target.sessionId !== target.sessionId) throw new Error("Return to this run's SSH session before adding a follow-up.");
+        promptQueue.enqueue(prompt.value, queueContext(target)); prompt.value = "";
+        setStatus("Prompt queued for this SSH session.");
+        prompt.focus();
+        void drainPromptQueue();
+      } catch (error) { setStatus(String(error), true); }
+      return;
+    }
+    await launchTask(prompt.value.trim(), target, prompt.value);
+  }
+
+  function queueContext(target: Target): PromptQueueContext {
+    return { sessionId: target.sessionId, contextKey: target.contextKey ?? target.sessionId, provider: providerSelect.value };
+  }
+
+  async function launchTask(task: string, target: Target, draft?: string, queuedPrompt?: QueuedAgentPrompt) {
     const currentRun: Run = {
       id: (options.createRunId ?? (() => crypto.randomUUID()))(),
       target: { ...target },
       provider: providerSelect.value as ProviderId,
       stopping: false,
     };
+    const startup = { id: currentRun.id, finished: false };
+    launching = startup;
     const resumeSessionId = conversation.value.trim() || null;
     run = currentRun;
     approvals = [];
     approvalReceivedAt.clear();
     approvalInFlight = null;
     resetSudoConsent();
-    outputBlocks = [];
-    outputTrimmed = false;
-    const task = prompt.value.trim();
+    runStartBlockId = nextBlockId;
+    pendingHistoryCommand = null;
+    recordedHistoryCommands.clear();
     appendTask(task);
+    if (draft !== undefined) prompt.value = "";
     setStatus("Starting the local agent…");
+    if (draft !== undefined && options.isVisible?.() !== false) prompt.focus();
     try {
       await options.invoke("start_ssh_automation", {
         runId: currentRun.id, sessionId: currentRun.target.sessionId, provider: currentRun.provider, prompt: task, resumeSessionId,
       });
+      if (queuedPrompt) promptQueue.remove(queuedPrompt.id);
     } catch (error) {
-      if (disposed || run?.id !== currentRun.id) return;
+      if (disposed) return;
+      if (startup.finished) { if (queuedPrompt) promptQueue.remove(queuedPrompt.id); return; }
+      if (run?.id !== currentRun.id) return;
       run = null;
+      promptQueue.pause();
+      if (draft !== undefined && !prompt.value) prompt.value = draft;
       approvals = [];
       resetSudoConsent();
       const message = `Could not start automation: ${String(error)}`;
       appendEvent(message, "danger");
       setStatus(message, true);
+    } finally {
+      if (launching === startup) launching = null;
+      if (queuedPrompt) queuePendingId = null;
+      if (!disposed) { render(); if (!run) void drainPromptQueue(); }
     }
   }
 
-  async function stopRun() {
+  async function drainPromptQueue() {
+    if (disposed || run || launching || queuePendingId || promptQueue.state().paused || !promptQueue.state().prompts.length) return;
+    try {
+      const target = options.getSelectedTarget();
+      if (!target) throw new Error("The SSH session disconnected. Reconnect and resume this queue explicitly.");
+      const next = promptQueue.next(queueContext(target));
+      if (!next) return;
+      if (!CONVERSATION_ID_PATTERN.test(conversation.value.trim())) throw new Error("Choose this session's saved chat before resuming queued prompts.");
+      queuePendingId = next.id;
+      await launchTask(next.text, target, undefined, next);
+    } catch (error) { queuePendingId = null; promptQueue.pause(); setStatus(`Queue paused: ${String(error)}`, true); }
+  }
+
+  async function steerRun() {
+    if (disposed || options.isVisible?.() === false || !run || steerButton.disabled) return;
+    try {
+      const target = options.getSelectedTarget();
+      if (!target || target.sessionId !== run.target.sessionId) throw new Error("Return to this run's SSH session before steering it.");
+      promptQueue.enqueue(prompt.value, queueContext(target), true);
+      promptQueue.resume(queueContext(target));
+      prompt.value = ""; steeringRunId = run.id;
+      prompt.focus();
+      await stopRun(true);
+    } catch (error) { promptQueue.pause(); setStatus(`Could not steer this task: ${String(error)}`, true); }
+  }
+
+  async function steerQueuedPrompt(id: number) {
+    if (disposed || options.isVisible?.() === false || !run || run.stopping || launching || queuePendingId
+      || !CONVERSATION_ID_PATTERN.test(conversation.value.trim()) || !promptQueue.state().prompts.some(prompt => prompt.id === id)) return;
+    try {
+      const target = options.getSelectedTarget();
+      if (!target || target.sessionId !== run.target.sessionId) throw new Error("Return to this run's SSH session before steering it.");
+      promptQueue.resume(queueContext(target)); promptQueue.prioritize(id);
+      steeringRunId = run.id;
+      prompt.focus(); await stopRun(true);
+    } catch (error) { promptQueue.pause(); setStatus(`Could not steer this task: ${String(error)}`, true); }
+  }
+
+  async function togglePromptQueue() {
+    if (disposed || options.isVisible?.() === false || run?.stopping) return;
+    try {
+      if (promptQueue.state().paused) {
+        const target = options.getSelectedTarget();
+        if (!target) throw new Error("Reconnect this SSH session before resuming its queue.");
+        promptQueue.resume(queueContext(target)); render(); await drainPromptQueue();
+      } else { promptQueue.pause(); render(); }
+    } catch (error) { setStatus(String(error), true); }
+    finally { if (!disposed && options.isVisible?.() !== false) prompt.focus(); }
+  }
+
+  async function stopRun(steering = false) {
+    if (!steering) { promptQueue.pause(); steeringRunId = null; }
     if (!run || run.stopping || disposed) return;
     const runId = run.id;
     run = { ...run, stopping: true };
-    setStatus("Stopping the local agent and closing its command channel…");
+    setStatus(steering ? "Stopping this task before continuing the chat with your instruction…" : "Stopping the local agent and closing its command channel…");
     try {
       await options.invoke("stop_ssh_automation", { runId });
     } catch (error) {
       if (disposed || run?.id !== runId) return;
+      if (steering) { steeringRunId = null; promptQueue.pause(); }
       run = { ...run, stopping: false };
       setStatus(`Could not stop automation: ${String(error)}. Try Stop again.`, true);
     }
@@ -734,7 +1065,7 @@ export function initAutomation(options: AutomationOptions) {
 
   async function respondToApproval(approved: boolean) {
     const approval = approvals[0];
-    if (!run || !approval || approvalInFlight || run.stopping || disposed) return;
+    if (!run || !approval || approvalInFlight || run.stopping || disposed || options.isVisible?.() === false) return;
     const runId = run.id;
     approvalInFlight = approval.requestId;
     render();
@@ -757,7 +1088,7 @@ export function initAutomation(options: AutomationOptions) {
 
   async function respondToSudoConsent(approved: boolean) {
     const consent = sudoConsent;
-    if (!run || !consent || sudoInFlight || run.stopping || disposed) return;
+    if (!run || !consent || sudoInFlight || run.stopping || disposed || options.isVisible?.() === false) return;
     const runId = run.id;
     const response: SudoResponse = { requestId: consent.requestId, approved };
     sudoInFlight = response;
@@ -793,9 +1124,20 @@ export function initAutomation(options: AutomationOptions) {
 
   function clearConversation() {
     if (run || !displayedConversationKey || disposed) return;
+    if (promptQueue.state().prompts.length) { setStatus("Remove queued prompts before starting a new chat.", true); return; }
     conversation.value = "";
     conversationDrafts.set(displayedConversationKey, "");
-    try { storage?.removeItem(displayedConversationKey); conversationError = ""; }
+    const target = options.getSelectedTarget();
+    const draftKey = target ? transcriptStorageKey(target, providerSelect.value, "") : null;
+    if (draftKey) {
+      transcripts.set(draftKey, { blocks: [], trimmed: false });
+      displayedTranscriptKey = undefined;
+    }
+    try {
+      storage?.removeItem(displayedConversationKey);
+      if (draftKey) storage?.removeItem(draftKey);
+      conversationError = "";
+    }
     catch (error) { conversationError = `Could not clear this chat context: ${String(error)}. Retry New chat.`; }
     render();
   }
@@ -803,6 +1145,12 @@ export function initAutomation(options: AutomationOptions) {
   bind(toggle, "click", () => setOpen(Boolean(panel.hidden), true));
   bind(element("automation-close"), "click", () => setOpen(false, true));
   bind(providerSelect, "change", () => {
+    if (promptQueue.state().prompts.length) { render(); return; }
+    try {
+      storage?.setItem(PROVIDER_STORAGE_KEY, providerSelect.value);
+    } catch (error) {
+      setStatus(`Could not save the selected local agent: ${String(error)}. Select it again after reopening.`, true);
+    }
     render();
     if (panelOpened) void loadLocalChats();
   });
@@ -810,22 +1158,27 @@ export function initAutomation(options: AutomationOptions) {
     if (run || disposed) return;
     if (!chatSelect.value) { clearConversation(); return; }
     conversation.value = chatSelect.value;
-    if (displayedConversationKey) conversationDrafts.set(displayedConversationKey, conversation.value);
-    conversationError = "";
+    const target = options.getSelectedTarget();
+    if (target) saveConversation(target, providerSelect.value as ProviderId, conversation.value);
     render();
   });
-  bind(refreshChatsButton, "click", () => { void loadLocalChats(true); });
+  bind(refreshChatsButton, "click", () => { retryHistory(); void loadLocalChats(true); });
   bind(conversation, "input", () => {
     if (displayedConversationKey) conversationDrafts.set(displayedConversationKey, conversation.value);
     conversationError = "";
+    const target = options.getSelectedTarget();
+    const id = conversation.value.trim();
+    if (target && (!id || CONVERSATION_ID_PATTERN.test(id))) saveConversation(target, providerSelect.value as ProviderId, id);
     render();
   });
   bind(newChatButton, "click", clearConversation);
   bind(prompt, "input", render);
   bind(prompt, "keydown", event => {
     const key = event as KeyboardEvent;
-    if (key.key !== "Enter" || !(key.ctrlKey || key.metaKey) || key.isComposing) return;
-    void startRun(key);
+    if (key.key !== "Enter" || key.isComposing || key.shiftKey || key.altKey) return;
+    key.preventDefault();
+    if (key.ctrlKey || key.metaKey) void steerRun();
+    else void startRun(key);
   });
   bind(element("automation-form"), "submit", startRun);
   bind(output, "click", async event => {
@@ -839,7 +1192,8 @@ export function initAutomation(options: AutomationOptions) {
     }
   });
   bind(refreshButton, "click", refreshProviders);
-  bind(stopButton, "click", stopRun);
+  bind(stopButton, "click", async () => { if (options.isVisible?.() !== false) await stopRun(); });
+  bind(steerButton, "click", steerRun);
   bind(approveButton, "click", () => { void respondToApproval(true); });
   bind(denyButton, "click", () => { void respondToApproval(false); });
   bind(sudoAllowButton, "click", () => { void respondToSudoConsent(true); });
@@ -862,8 +1216,12 @@ export function initAutomation(options: AutomationOptions) {
 
   return {
     refresh() { if (!disposed) render(); },
+    open() { if (!disposed) setOpen(true, true); },
+    close() { if (!disposed) setOpen(false); },
+    stop: () => stopRun(),
     dispose() {
       disposed = true;
+      promptQueue.pause();
       stopCountdown();
       unlisten?.();
       bindings.forEach(unbind => unbind());
@@ -873,8 +1231,9 @@ export function initAutomation(options: AutomationOptions) {
 
 declare global {
   interface Window {
-    SleekSshAutomation?: { initAutomation: typeof initAutomation };
+    SleekSshAutomation?: { initAutomation: typeof initAutomation; initAutomationSessions: (options: AutomationSessionsOptions) => ReturnType<typeof initAutomationSessions> };
   }
 }
 
-if (typeof window !== "undefined") window.SleekSshAutomation = { initAutomation };
+if (typeof window !== "undefined") window.SleekSshAutomation = { initAutomation,
+  initAutomationSessions: options => initAutomationSessions(options, initAutomation) };
