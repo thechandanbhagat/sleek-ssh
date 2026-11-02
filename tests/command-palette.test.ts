@@ -6,6 +6,40 @@ import { fuzzyScore, initCommandPalette, parseConnectTarget, rankPaletteItems, t
 
 const HTML = readFileSync(new URL("../src/index.html", import.meta.url), "utf8");
 
+test("palette open state distinguishes global, session and quick connect modes", () => {
+  const h = createHarness();
+  for (const mode of ["all", "session", "connect"] as const) {
+    assert.equal(h.palette.isOpen(), false);
+    h.palette.open(mode);
+    assert.equal(h.palette.isOpen(), true);
+    for (const expected of ["all", "session", "connect"] as const) {
+      assert.equal(h.palette.isOpen(expected), expected === mode);
+    }
+    h.palette.close();
+    assert.equal(h.palette.isOpen(mode), false);
+  }
+  h.palette.dispose();
+});
+
+test("session palettes show only session items, label the host and never offer quick connect", () => {
+  const runs: string[] = [];
+  let items: PaletteItem[] = [{ id: "folder", group: "Remote folders", title: "App", subtitle: "/srv/app", icon: "folder", run: () => { runs.push("App"); } }];
+  const h = createHarness({ sessionItems: () => items });
+  h.palette.open("session");
+  assert.deepEqual(h.titles(), ["App"]);
+  assert.match(h.document.getElementById("palette-context")!.textContent!, /API.*deploy@api.test:22/);
+  assert.match(h.input.placeholder, /this session/);
+  h.type("deploy@other.test");
+  assert.deepEqual(h.titles(), []); assert.deepEqual(h.targets, []);
+  h.type("App"); h.input.dispatchEvent(key(h.window, "Enter"));
+  assert.deepEqual(runs, ["App"]); assert.equal(h.palette.isOpen(), false);
+  h.palette.open("session");
+  items = []; h.palette.refresh(); assert.deepEqual(h.titles(), []);
+  h.palette.open("all"); assert.ok(h.titles().includes("Web production"));
+  assert.equal(h.document.getElementById("palette-context")!.hidden, true);
+  h.palette.dispose();
+});
+
 function key(window: Window, name: string, modifiers: Partial<{ ctrlKey: boolean; shiftKey: boolean; metaKey: boolean }> = {}) {
   const event = new window.Event("keydown", { bubbles: true, cancelable: true });
   Object.defineProperties(event, {
@@ -17,7 +51,7 @@ function key(window: Window, name: string, modifiers: Partial<{ ctrlKey: boolean
   return event;
 }
 
-function createHarness(configuration: { items?: PaletteItem[]; connectItems?: (target: ConnectTarget | null) => PaletteItem[]; connectNote?: string } = {}) {
+function createHarness(configuration: { items?: PaletteItem[]; connectItems?: (target: ConnectTarget | null) => PaletteItem[]; connectNote?: string; sessionItems?: () => readonly PaletteItem[]; sessionLabel?: string } = {}) {
   const { document, window } = parseHTML(HTML);
   const root = document.getElementById("command-palette") as HTMLElement;
   const runs: Array<{ id: string; modifiers: PaletteModifiers }> = [];
@@ -35,6 +69,8 @@ function createHarness(configuration: { items?: PaletteItem[]; connectItems?: (t
   const palette = initCommandPalette({
     root,
     getItems: () => items,
+    getSessionItems: configuration.sessionItems,
+    getSessionLabel: () => configuration.sessionLabel ?? "API · deploy@api.test:22",
     getConnectItems: target => {
       targets.push(target);
       if (configuration.connectItems) return configuration.connectItems(target);

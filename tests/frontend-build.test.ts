@@ -84,9 +84,14 @@ test("the production build hook recreates missing frontend assets and registers 
   assert.equal(modules.status, 0, modules.stdout + modules.stderr);
   const registrations = JSON.parse(modules.stdout);
   assert.equal(registrations.SleekSshAutomation?.initAutomation, "function");
+  assert.equal(registrations.SleekSshAutomation?.initAutomationSessions, "function");
   assert.equal(registrations.SleekSshLocalTerminals?.initLocalTerminalPanel, "function");
   assert.equal(registrations.SleekSshCommandPalette?.initCommandPalette, "function");
   assert.equal(registrations.SleekSshCommandPalette?.parseConnectTarget, "function");
+  assert.equal(registrations.SleekSshHistory?.initCommandHistoryIntegration, "function");
+  assert.equal(registrations.SleekSshWorkspaces?.initSavedWorkspacesIntegration, "function");
+  assert.equal(registrations.SleekSshPanes?.createTerminalGroups, "function");
+  assert.equal(registrations.SleekSshPanes?.initPaneDivider, "function");
 });
 
 test("the build hook fails on invalid TypeScript before producing packageable frontend assets", context => {

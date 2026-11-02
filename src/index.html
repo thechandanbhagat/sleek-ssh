@@ -14,11 +14,19 @@
     <link rel="stylesheet" href="automation.css" />
     <link rel="stylesheet" href="local-terminal-locations.css" />
     <link rel="stylesheet" href="command-palette.css" />
+    <link rel="stylesheet" href="command-history.css" />
+    <link rel="stylesheet" href="saved-workspaces.css" />
+    <link rel="stylesheet" href="named-snippets.css" />
+    <link rel="stylesheet" href="terminal-panes.css" />
+    <link rel="stylesheet" href="remote-folders.css" />
     <script src="assets/xterm.js"></script>
     <script src="assets/addon-fit.js"></script>
     <script type="module" src="/generated/automation.js" defer></script>
     <script type="module" src="/generated/local-terminal-panel.js" defer></script>
     <script type="module" src="/generated/command-palette.js" defer></script>
+    <script type="module" src="/generated/command-history-integration.js" defer></script>
+    <script type="module" src="/generated/saved-workspaces-integration.js" defer></script>
+    <script type="module" src="/generated/terminal-panes.js" defer></script>
     <script type="module" src="/main.js" defer></script>
   </head>
 
@@ -59,6 +67,9 @@
         </button>
         <button class="nav-tab rail-button" type="button" data-tab="terminal" title="Local shells" aria-label="Local shells" aria-pressed="false" aria-controls="sidebar-panel">
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"></rect><path d="M7 9.5l3 2.5-3 2.5M12.5 15H17"></path></svg>
+        </button>
+        <button class="nav-tab rail-button" type="button" data-tab="workspaces" title="Workspaces" aria-label="Workspaces" aria-pressed="false" aria-controls="sidebar-panel">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M3 9h18M9 9v12"></path></svg>
         </button>
         <button class="nav-tab rail-button" type="button" data-tab="keys" title="SSH keys" aria-label="SSH keys" aria-pressed="false" aria-controls="sidebar-panel">
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"></circle><path d="M10.9 12.1L19 4M15.5 7.5l2.5 2.5M13.5 9.5l1.5 1.5"></path></svg>
@@ -190,6 +201,11 @@
             </div>
           </section>
 
+          <section class="tab-pane" id="pane-workspaces" aria-labelledby="pane-workspaces-title">
+            <header class="pane-header"><h2 id="pane-workspaces-title">Workspaces</h2></header>
+            <div class="pane-body" id="saved-workspaces-panel"></div>
+          </section>
+
           <section class="tab-pane" id="pane-keys" aria-labelledby="pane-keys-title">
             <header class="pane-header">
               <h2 id="pane-keys-title">SSH keys</h2>
@@ -243,6 +259,7 @@
                 <span id="automation-title">Agent</span>
                 <span class="attention-dot" id="automation-attention" hidden></span>
               </span>
+              <button class="side-panel-tab" id="automation-history-tab" type="button" aria-pressed="false">History</button>
             </div>
             <details class="menu" id="automation-menu">
               <summary class="icon-button" title="More agent options" aria-label="More agent options">
@@ -326,18 +343,53 @@
           </div>
 
           <form class="automation-composer" id="automation-form">
-            <p class="automation-status" id="automation-status" role="status" aria-live="polite">Select a connected SSH server to begin.</p>
+            <p class="automation-status sr-only" id="automation-status" role="status" aria-live="polite">Select a connected SSH server to begin.</p>
+            <section class="automation-queue" id="automation-queue" aria-labelledby="automation-queue-title" hidden>
+              <div class="sr-only">
+                <strong id="automation-queue-title">Queued prompts</strong>
+                <span id="automation-queue-count" role="status" aria-live="polite"></span>
+              </div>
+              <ol id="automation-queue-list" aria-label="Queued prompts for this SSH session"></ol>
+            </section>
             <label class="sr-only" for="automation-prompt">Task for the selected server</label>
             <div class="composer-box">
-              <textarea id="automation-prompt" rows="3" maxlength="16000" placeholder="Describe a task, like: inspect why nginx is failing and propose a fix" required></textarea>
+              <textarea id="automation-prompt" rows="3" maxlength="16000" placeholder="Message the agent…" aria-description="Enter to send or queue. Shift+Enter for a new line. Ctrl+Enter to steer the running task." required></textarea>
               <div class="composer-actions">
-                <span class="composer-hint"><span class="kbd-group" aria-hidden="true"><kbd>Ctrl</kbd><kbd>Enter</kbd></span> to run</span>
-                <button class="btn btn-danger-outline btn-small" id="automation-stop" type="button" disabled>Stop</button>
-                <button class="btn btn-primary btn-small" id="automation-start" type="submit" disabled>Run task</button>
+                <button class="btn btn-danger-outline btn-small" id="automation-stop" type="button" title="Stop the agent and close its command channel. Detached remote processes may continue." disabled>Stop</button>
+                <button class="btn btn-secondary btn-small" id="automation-steer" type="button" title="Stop this task and continue the same chat (Ctrl+Enter)" aria-keyshortcuts="Control+Enter Meta+Enter" hidden>Steer now</button>
+                <button class="btn btn-primary btn-small" id="automation-start" type="submit" title="Run task (Enter)" aria-keyshortcuts="Enter" disabled>Run task</button>
               </div>
             </div>
-            <p class="automation-guidance" id="automation-stop-help" hidden>Stop ends the agent and closes its command channel. Detached remote processes may continue.</p>
           </form>
+        </section>
+
+        <section class="command-history-panel side-panel" id="command-history-panel" aria-labelledby="command-history-title" hidden>
+          <header class="side-panel-header">
+            <div class="side-panel-tabs" role="group" aria-label="Side panel">
+              <button class="side-panel-tab" id="command-history-files-tab" type="button" aria-pressed="false">Files</button>
+              <button class="side-panel-tab" id="command-history-agent-tab" type="button" aria-pressed="false">Agent</button>
+              <span class="side-panel-tab is-active" aria-current="true" id="command-history-title">History</span>
+            </div>
+            <button class="icon-button" id="command-history-close" type="button" title="Hide command history" aria-label="Hide command history">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"></path></svg>
+            </button>
+          </header>
+          <div class="command-history-views" role="group" aria-label="Command library">
+            <button id="command-history-view-history" class="btn btn-secondary" type="button" aria-pressed="true" aria-controls="command-history-browser">History</button>
+            <button id="command-history-view-snippets" class="btn btn-secondary" type="button" aria-pressed="false" aria-controls="named-snippets-root">Snippets</button>
+          </div>
+          <div id="command-history-browser">
+            <div class="command-history-controls">
+              <p id="command-history-target"></p>
+              <label class="sr-only" for="command-history-search">Search command history</label>
+              <input id="command-history-search" type="search" placeholder="Search commands…" autocomplete="off" spellcheck="false" />
+              <p class="command-history-hint">Click a command to insert it. <kbd>Tab</kbd> accepts a faint suggestion; <kbd>Esc</kbd> dismisses it. Start a command with a space to leave it out of history.</p>
+            </div>
+            <p id="command-history-error" role="status" aria-live="polite" hidden></p>
+            <p id="command-history-empty">Executed terminal and agent commands appear here.</p>
+            <ul id="command-history-list" aria-label="Previously executed commands"></ul>
+          </div>
+          <div id="named-snippets-root" hidden></div>
         </section>
       </main>
     </div>
@@ -353,7 +405,8 @@
         <span id="status-vpn-label">VPN</span>
       </button>
       <span class="statusbar-spacer"></span>
-      <button class="status-item status-button automation-toggle" id="btn-automation-toggle" type="button" aria-expanded="false" aria-controls="automation-panel" data-state="idle">Agent</button>
+      <button class="status-item status-button" id="btn-command-history-toggle" type="button" aria-expanded="false" aria-controls="command-history-panel">History</button>
+      <button class="status-item status-button automation-toggle" id="btn-automation-toggle" type="button" aria-label="Agent" aria-expanded="false" aria-controls="automation-panel" data-state="idle">Agent</button>
       <button class="status-item status-button" id="status-palette" type="button" aria-haspopup="dialog" aria-controls="command-palette">
         <span class="kbd-group" aria-hidden="true"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd></span>
         <span>Commands</span>
@@ -362,6 +415,7 @@
 
     <div class="palette-overlay" id="command-palette" hidden>
       <div class="palette" role="dialog" aria-modal="true" aria-labelledby="palette-input-label">
+        <p class="palette-context" id="palette-context" hidden></p>
         <div class="palette-input-row">
           <svg class="icon palette-search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"></circle><path d="M20 20l-4.2-4.2"></path></svg>
           <label class="sr-only" for="palette-input" id="palette-input-label">Search hosts, shells and commands</label>
@@ -381,6 +435,33 @@
         </div>
       </div>
     </div>
+
+    <dialog class="modal-card remote-folder-dialog" id="remote-folder-dialog" aria-labelledby="remote-folder-title" aria-describedby="remote-folder-host">
+      <div class="modal-header">
+        <h3 id="remote-folder-title">Save remote folder</h3>
+        <button class="btn btn-secondary btn-small" type="button" data-remote-folder-cancel aria-label="Close save remote folder">Close</button>
+      </div>
+      <form class="remote-folder-save-form">
+        <p class="helper-text" id="remote-folder-host"></p>
+        <div class="form-group">
+          <label for="remote-folder-name">Shortcut name</label>
+          <input id="remote-folder-name" type="text" maxlength="80" placeholder="App or Logs" required autocomplete="off" />
+        </div>
+        <div class="form-group">
+          <label for="remote-folder-path">Remote folder path</label>
+          <input id="remote-folder-path" type="text" maxlength="4096" placeholder="/srv/app or ~/projects" required autocomplete="off" spellcheck="false" />
+        </div>
+        <label class="sudo-checkbox-label" for="remote-folder-start">
+          <input id="remote-folder-start" type="checkbox" /> Start new connections here
+        </label>
+        <p class="helper-text">Available in this server's session palette whenever you connect.</p>
+        <p id="remote-folder-error" class="profile-save-error" role="alert" hidden></p>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" type="button" data-remote-folder-cancel>Cancel</button>
+          <button class="btn btn-primary" type="submit">Save folder</button>
+        </div>
+      </form>
+    </dialog>
 
     <div class="modal-overlay hidden" id="quick-connect-modal" role="dialog" aria-modal="true" aria-labelledby="quick-connect-modal-title">
       <div class="modal-card quick-connect-modal-card">
@@ -516,6 +597,18 @@
             </div>
           </div>
 
+          <fieldset class="remote-folders-settings" id="prof-remote-folders-settings">
+            <legend>Remote folders</legend>
+            <div class="form-group">
+              <label for="prof-start-path">Starting folder (optional)</label>
+              <input type="text" id="prof-start-path" maxlength="4096" placeholder="/srv/app or ~/projects" autocomplete="off" spellcheck="false" aria-describedby="prof-start-path-help" />
+              <p class="helper-text" id="prof-start-path-help">Start new SSH connections here. Reconnects and restored workspaces keep their last folder.</p>
+            </div>
+            <p class="helper-text">Named shortcuts appear in this server's SSH palette (Ctrl+Shift+K).</p>
+            <div id="prof-remote-folders"></div>
+            <button class="btn btn-secondary btn-small" type="button" id="prof-add-remote-folder">Add folder shortcut</button>
+          </fieldset>
+
           <fieldset class="sudo-settings">
             <legend>Sudo password shortcut</legend>
             <label class="sudo-checkbox-label" for="prof-sudo-shortcut">
@@ -626,5 +719,17 @@
         </div>
       </div>
     </div>
+    <dialog id="pane-picker" class="pane-picker" aria-labelledby="pane-picker-title">
+      <form id="pane-picker-form">
+        <h2 id="pane-picker-title">Split terminal</h2>
+        <label for="pane-picker-terminal">Terminal for the second pane</label>
+        <select id="pane-picker-terminal" required></select>
+        <p class="helper-text">Each pane has its own connection. Use Ctrl+Alt+Arrow keys to switch focus.</p>
+        <div class="pane-picker-actions">
+          <button class="btn btn-secondary" id="pane-picker-cancel" type="button">Cancel</button>
+          <button class="btn btn-primary" type="submit">Open pane</button>
+        </div>
+      </form>
+    </dialog>
   </body>
 </html>

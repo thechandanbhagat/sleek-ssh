@@ -1,3 +1,8 @@
+import * as remoteFolders from "./remote-folders.ts";
+import { initRemoteFoldersForm } from "./remote-folders-form.ts";
+import { initRemoteFolderDialog } from "./remote-folder-dialog.ts";
+import { navigateRemoteFolder } from "./remote-folder-navigation.ts";
+
 export type PaletteIcon = "server" | "terminal" | "folder" | "plus" | "ports" | "key" | "shield" | "gear" | "bolt" | "lock" | "form" | "agent" | "search" | "panel" | "close" | "refresh";
 export type PaletteStatus = "connected" | "connecting" | "disconnected" | null;
 export type PaletteModifiers = Readonly<{ ctrlKey: boolean; shiftKey: boolean }>;
@@ -17,13 +22,15 @@ export type PaletteItem = Readonly<{
   run: (modifiers: PaletteModifiers) => void;
 }>;
 export type ConnectTarget = Readonly<{ username: string | null; host: string; port: number | null }>;
-export type PaletteMode = "all" | "connect";
+export type PaletteMode = "all" | "connect" | "session";
 export type RankedItem = Readonly<{ item: PaletteItem; score: number; titleIndices: readonly number[] }>;
 
 type PaletteOptions = {
   root: HTMLElement;
   getItems: () => readonly PaletteItem[];
   getConnectItems: (target: ConnectTarget | null) => readonly PaletteItem[];
+  getSessionItems?: () => readonly PaletteItem[];
+  getSessionLabel?: () => string;
   /** Shown under the quick connect actions once the input names a host. */
   connectNote?: string;
   maxItemsPerGroup?: number;
@@ -40,6 +47,7 @@ const USER_NAME = /^[a-z0-9_.][a-z0-9_.-]{0,63}$/i;
 const PLACEHOLDERS: Record<PaletteMode, string> = {
   all: "Search hosts, shells and commands, or type user@host",
   connect: "Type user@host or user@host:port",
+  session: "Search this session's folders and snippets",
 };
 
 const ICONS: Record<PaletteIcon, string> = {
@@ -199,6 +207,7 @@ export function initCommandPalette(options: PaletteOptions) {
   const footerNote = root.querySelector<HTMLElement>("#palette-footer-note");
   const note = root.querySelector<HTMLElement>("#palette-note");
   const modifierHint = root.querySelector<HTMLElement>("#palette-hint-modifier");
+  const context = root.querySelector<HTMLElement>("#palette-context");
   const maxPerGroup = options.maxItemsPerGroup ?? DEFAULT_MAX_ITEMS_PER_GROUP;
   let mode: PaletteMode = "all";
   let visible: RankedItem[] = [];
@@ -247,7 +256,7 @@ export function initCommandPalette(options: PaletteOptions) {
 
   function computeVisible() {
     const query = input.value;
-    const target = parseConnectTarget(query);
+    const target = mode === "session" ? null : parseConnectTarget(query);
     if (mode === "connect") {
       const connect = options.getConnectItems(target);
       return { target, groups: groupItems(connect.map(item => ({ item, score: 0, titleIndices: [] })), false, null) };
@@ -359,18 +368,20 @@ export function initCommandPalette(options: PaletteOptions) {
       empty.setAttribute("role", "presentation");
       empty.textContent = mode === "connect"
         ? "Type a user and host, like deploy@10.0.4.12 or deploy@web.test:2222."
-        : `Nothing matches “${input.value.trim()}”. Type user@host to connect without saving.`;
+        : mode === "session" ? `No folders or snippets match “${input.value.trim()}”. Try another name.`
+          : `Nothing matches “${input.value.trim()}”. Type user@host to connect without saving.`;
       nodes.push(empty);
     }
     results.replaceChildren(...nodes);
     updateSelection(false);
     const connectFirst = visible[0]?.item.group === QUICK_CONNECT_GROUP;
     if (footerNote) {
-      footerNote.textContent = mode === "connect" || connectFirst
+      footerNote.textContent = mode === "session" ? "Folders and snippets for this SSH session"
+        : mode === "connect" || connectFirst
         ? "Leave out the user or port to use your defaults from Settings"
         : "Type user@host to quick connect";
     }
-    if (modifierHint) modifierHint.hidden = connectFirst || mode === "connect";
+    if (modifierHint) modifierHint.hidden = connectFirst || mode !== "all";
   }
 
   function updateSelection(scroll = true) {
@@ -402,10 +413,16 @@ export function initCommandPalette(options: PaletteOptions) {
     if (!open) previousFocus = document_.activeElement;
     mode = nextMode;
     open = true;
-    staticItems = mode === "all" ? options.getItems() : [];
+    staticItems = mode === "session" ? options.getSessionItems?.() ?? [] : mode === "all" ? options.getItems() : [];
+    if (context) {
+      context.hidden = mode !== "session";
+      context.textContent = mode === "session" ? options.getSessionLabel?.() ?? "SSH session" : "";
+    }
     root.hidden = false;
     root.dataset.mode = mode;
     input.placeholder = PLACEHOLDERS[mode];
+    const label = root.querySelector<HTMLElement>("#palette-input-label");
+    if (label) label.textContent = mode === "session" ? `Search folders and snippets for ${options.getSessionLabel?.() ?? "this SSH session"}` : "Search hosts, shells and commands";
     input.value = query;
     selectedIndex = 0;
     render();
@@ -480,8 +497,8 @@ export function initCommandPalette(options: PaletteOptions) {
   return {
     open: openPalette,
     close: () => close(true),
-    isOpen: () => open,
-    refresh() { if (open) { staticItems = mode === "all" ? options.getItems() : []; render(); } },
+    isOpen: (expectedMode?: PaletteMode) => open && (expectedMode === undefined || mode === expectedMode),
+    refresh() { if (open) { staticItems = mode === "session" ? options.getSessionItems?.() ?? [] : mode === "all" ? options.getItems() : []; render(); } },
     dispose() {
       close(false);
       input.removeEventListener("input", onInput);
@@ -497,7 +514,13 @@ export function initCommandPalette(options: PaletteOptions) {
 declare global {
   interface Window {
     SleekSshCommandPalette?: { initCommandPalette: typeof initCommandPalette; parseConnectTarget: typeof parseConnectTarget };
+    SleekSshRemoteFolders?: typeof remoteFolders & {
+      initRemoteFoldersForm: typeof initRemoteFoldersForm;
+      initRemoteFolderDialog: typeof initRemoteFolderDialog;
+      navigateRemoteFolder: typeof navigateRemoteFolder;
+    };
   }
 }
 
 if (typeof window !== "undefined") window.SleekSshCommandPalette = { initCommandPalette, parseConnectTarget };
+if (typeof window !== "undefined") window.SleekSshRemoteFolders = { ...remoteFolders, initRemoteFoldersForm, initRemoteFolderDialog, navigateRemoteFolder };
