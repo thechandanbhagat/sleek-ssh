@@ -26,15 +26,17 @@ A two-minute narrated product demo with animated UI, saved PowerShell locations,
 
 ## Screenshots
 
-These earlier v0.4.0 previews use fictional terminal output and saved data; they do not connect to real servers or run commands. The current sidebar has top-level Files, Agent, History, and Snippets tabs with one shared width.
+These v0.4.0 screenshots render the current interface with fictional terminal output and saved data. Native operations are mocked; no servers are contacted or commands executed. Files, Agent, History, and Snippets use the same saved 280px panel width.
 
-![SleekSSH v0.4.0 with independent PowerShell and Command Prompt panes, a saved workspace, and command history](docs/screenshots/workspace-v0.4.0.jpg)
+![SleekSSH v0.4.0 SSH and PowerShell split panes with a saved workspace, compact history, and four sidebar tabs](docs/screenshots/workspace-v0.4.0.jpg)
 
 Files, Agent, History, and Snippets share one saved, resizable panel width. Workspaces restore the selected panel, and History follows the focused pane.
 
 ![SleekSSH v0.4.0 named snippets with reusable Bash, Zsh, and PowerShell command templates](docs/screenshots/snippets-v0.4.0.jpg)
 
 The **Snippets** tab sits alongside Files, Agent, and History and keeps named command templates ready for parameter entry and review.
+
+Compare the [Files panel](docs/screenshots/files-v0.4.0.jpg) and [Agent panel](docs/screenshots/agent-v0.4.0.jpg) at the same saved width.
 
 The Agent and global command palette screenshots below show v0.3.0 with fictional hosts, files, and agent responses.
 
