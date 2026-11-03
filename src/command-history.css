@@ -1,0 +1,161 @@
+.command-history-panel {
+  --history-space-xs: 4px;
+  --history-space-sm: 8px;
+  --history-space-md: 12px;
+  --history-space-lg: 16px;
+  --history-control-height: 44px;
+  --history-font-small: 12px;
+  --history-font-command: 13px;
+  --history-icon-size: 16px;
+  --history-focus-width: 2px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  width: var(--side-panel-width);
+  min-width: 0;
+  min-height: 0;
+  background: var(--ink-2);
+  border-inline-start: 1px solid var(--line);
+}
+
+.command-history-panel[hidden] { display: none; }
+
+#command-history-browser {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+#command-history-browser[hidden], #named-snippets-root[hidden] { display: none; }
+
+.command-history-context,
+.command-history-controls {
+  display: grid;
+  gap: var(--history-space-sm);
+  padding: var(--history-space-md) var(--history-space-lg);
+  border-block-end: 1px solid var(--line);
+}
+
+#command-history-target,
+.command-history-hint,
+#command-history-empty,
+#command-history-error {
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--history-font-small);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+#command-history-search {
+  width: 100%;
+  min-height: var(--history-control-height);
+  padding: var(--history-space-sm) var(--history-space-md);
+}
+
+#command-history-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: var(--history-space-sm);
+  list-style: none;
+  overflow-y: auto;
+}
+
+.command-history-item {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border-radius: var(--radius);
+}
+
+.command-history-item:hover,
+.command-history-item:focus-within { background: var(--ink-3); }
+
+.command-history-insert {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--history-space-sm);
+  flex: 1;
+  min-width: 0;
+  min-height: var(--history-control-height);
+  padding: var(--history-space-xs) var(--history-space-sm);
+  text-align: start;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-1);
+  cursor: pointer;
+}
+
+.command-history-insert:focus-visible,
+.command-history-save-snippet:focus-visible {
+  outline: var(--history-focus-width) solid var(--accent);
+  outline-offset: calc(-1 * var(--history-focus-width));
+}
+
+.command-history-save-snippet {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: var(--history-control-height);
+  min-height: var(--history-control-height);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.command-history-save-snippet:hover:not(:disabled) { background: var(--ink-4); color: var(--accent); }
+.command-history-save-snippet:disabled { color: var(--text-4); cursor: not-allowed; }
+.command-history-save-snippet svg {
+  width: var(--history-icon-size);
+  height: var(--history-icon-size);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.command-history-command {
+  min-width: 0;
+  color: var(--text-1);
+  font-family: var(--font-mono);
+  font-size: var(--history-font-command);
+  line-height: 1.5;
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.command-history-count {
+  padding: 0 var(--history-space-xs);
+  border-radius: var(--radius-sm);
+  background: var(--ink-4);
+  color: var(--text-2);
+  font-size: var(--history-font-small);
+  line-height: 1.75;
+  white-space: nowrap;
+}
+
+#command-history-empty,
+#command-history-error { padding: var(--history-space-lg); }
+#command-history-error { color: var(--danger); }
+.command-history-panel > .command-history-hint { padding: var(--history-space-md) var(--history-space-lg); border-block-start: 1px solid var(--line); }
+
+.terminal-history-suggestion {
+  position: absolute;
+  z-index: 1;
+  overflow: hidden;
+  color: var(--text-4);
+  white-space: pre;
+  pointer-events: none;
+}
+
+.terminal-history-suggestion[hidden] { display: none; }

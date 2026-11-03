@@ -5,7 +5,7 @@
   display: flex;
   flex-direction: column;
   flex: none;
-  width: clamp(340px, 30vw, 440px);
+  width: var(--side-panel-width);
   min-width: 0;
   min-height: 0;
   background: var(--ink-2);
@@ -15,6 +15,16 @@
 .automation-panel[hidden] {
   display: none;
 }
+
+.automation-session-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.automation-session-view[hidden] { display: none; }
 
 .automation-sr-only {
   position: absolute;
@@ -127,14 +137,14 @@
   color: var(--text-2);
 }
 
-#automation-target {
+:is(#automation-target, [data-automation-control="automation-target"]) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.automation-panel[data-running="true"] #automation-target {
+.automation-panel[data-running="true"] :is(#automation-target, [data-automation-control="automation-target"]) {
   color: var(--text-2);
 }
 
@@ -145,13 +155,13 @@
   overflow-wrap: anywhere;
 }
 
-#automation-provider-help[data-error="true"],
-#automation-chat-help[data-error="true"],
-#automation-conversation-help[data-error="true"] {
+:is(#automation-provider-help, [data-automation-control="automation-provider-help"])[data-error="true"],
+:is(#automation-chat-help, [data-automation-control="automation-chat-help"])[data-error="true"],
+:is(#automation-conversation-help, [data-automation-control="automation-conversation-help"])[data-error="true"] {
   color: var(--danger);
 }
 
-#automation-chat-help[data-quiet="true"] {
+:is(#automation-chat-help, [data-automation-control="automation-chat-help"])[data-quiet="true"] {
   display: none;
 }
 
@@ -560,8 +570,7 @@
 }
 
 .automation-approval[hidden],
-#automation-sudo-status[hidden],
-#automation-stop-help[hidden] {
+:is(#automation-sudo-status, [data-automation-control="automation-sudo-status"])[hidden] {
   display: none;
 }
 
@@ -601,8 +610,8 @@
   overflow-wrap: anywhere;
 }
 
-#automation-command,
-#automation-sudo-command {
+:is(#automation-command, [data-automation-control="automation-command"]),
+:is(#automation-sudo-command, [data-automation-control="automation-sudo-command"]) {
   max-height: 160px;
   margin: 0;
   overflow: auto;
@@ -617,7 +626,7 @@
   overflow-wrap: anywhere;
 }
 
-#automation-command::before {
+:is(#automation-command, [data-automation-control="automation-command"])::before {
   content: "$ ";
   color: var(--text-3);
 }
@@ -689,7 +698,7 @@
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-#automation-prompt {
+:is(#automation-prompt, [data-automation-control="automation-prompt"]) {
   min-height: 44px;
   max-height: 220px;
   padding: 0;
@@ -703,13 +712,13 @@
   field-sizing: content;
 }
 
-#automation-prompt:disabled {
+:is(#automation-prompt, [data-automation-control="automation-prompt"]):disabled {
   opacity: 0.6;
 }
 
 /* The composer box already shows focus. */
-.automation-panel #automation-prompt:focus,
-.automation-panel #automation-prompt:focus-visible {
+.automation-panel :is(#automation-prompt, [data-automation-control="automation-prompt"]):focus,
+.automation-panel :is(#automation-prompt, [data-automation-control="automation-prompt"]):focus-visible {
   outline: none;
   box-shadow: none;
 }
@@ -717,36 +726,47 @@
 .composer-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
-.composer-hint {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-3);
-  font-size: 11.5px;
-  white-space: nowrap;
-}
-
-.automation-panel[data-running="true"] .composer-hint {
-  visibility: hidden;
-}
-
-.automation-panel:not([data-running="true"]) #automation-stop,
-.automation-panel[data-running="true"] #automation-start {
+.automation-panel:not([data-running="true"]) :is(#automation-stop, [data-automation-control="automation-stop"]) {
   display: none;
 }
+
+.automation-queue {
+  --queue-gap: 8px;
+  --queue-padding: 4px;
+  --queue-icon-size: 16px;
+  --queue-control-size: 28px;
+  --queue-max-height: 160px;
+  --queue-font-size: 12px;
+  min-width: 0;
+  padding-inline: var(--queue-gap);
+  font-size: var(--queue-font-size);
+}
+.automation-queue[hidden] { display: none; }
+.automation-queue ol { display: flex; flex-direction: column; gap: var(--queue-padding); overflow-y: auto; max-height: var(--queue-max-height); margin: 0; padding: 0; list-style: none; }
+.automation-queue-item { position: relative; display: grid; grid-template-columns: var(--queue-icon-size) minmax(0, 1fr) auto var(--queue-control-size) var(--queue-control-size); align-items: center; column-gap: var(--queue-padding); padding: var(--queue-padding) var(--queue-gap); border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--ink-3); }
+.automation-queue-icon { display: flex; color: var(--text-3); }
+.automation-queue svg { flex: none; width: var(--queue-icon-size); height: var(--queue-icon-size); }
+.automation-queue-prompt { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-1); }
+.automation-queue-paused { margin-inline-end: var(--queue-gap); color: var(--text-3); font-weight: normal; }
+.automation-queue-action, .automation-queue-more summary { display: inline-flex; justify-content: center; align-items: center; gap: var(--queue-padding); min-width: var(--queue-control-size); height: var(--queue-control-size); padding-inline: var(--queue-padding); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-2); font-size: inherit; cursor: pointer; }
+.automation-queue-action:hover:enabled, .automation-queue-more summary:hover { background: var(--ink-4); color: var(--text-1); }
+.automation-queue-action:disabled { opacity: var(--terminal-search-disabled-opacity); }
+.automation-queue-more { grid-column: 1 / -1; }
+.automation-queue-more summary { position: absolute; inset-inline-end: var(--queue-gap); inset-block-start: var(--queue-padding); list-style: none; }
+.automation-queue-more summary::-webkit-details-marker { display: none; }
+.automation-queue-menu { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--queue-gap); padding-block-start: var(--queue-padding); border-top: 1px solid var(--line); }
 
 .automation-panel :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
-#automation-conversation {
+:is(#automation-conversation, [data-automation-control="automation-conversation"]) {
   font-family: var(--font-mono);
 }
 

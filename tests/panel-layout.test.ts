@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createContext, runInContext } from "node:vm";
+import { createTerminalGroups } from "../src/terminal-panes.ts";
 
 const APPLICATION_SOURCE = readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
 const LAYOUT_SOURCE = APPLICATION_SOURCE.split("// --- PANEL LAYOUT ---")[1].split("// --- WINDOW CONTROLS ---")[0];
+const PANE_SELECTION_SOURCE = APPLICATION_SOURCE.slice(APPLICATION_SOURCE.indexOf("function getActiveSession()"), APPLICATION_SOURCE.indexOf("function activateSession("));
 const STORAGE_KEY = "sleekssh_panel_layout";
 const SIDEBAR_DEFAULT = 248;
 const SFTP_DEFAULT = 280;
@@ -14,6 +16,8 @@ const COMPACT_WINDOW = 700;
 const NARROW_WINDOW = 480;
 const KEYBOARD_STEP = 16;
 const PANEL_MINIMUMS_WIDTH = 740;
+const WIDE_PANE_WIDTH = 700;
+const COMPACT_PANE_WIDTH = 500;
 
 type EventListener = (event: Record<string, unknown>) => void;
 
@@ -22,6 +26,7 @@ function createElement(width = 0) {
   const attributes = new Map<string, string>();
   const listeners = new Map<string, EventListener>();
   const capturedPointers = new Set<number>();
+  const styles = new Map<string, string>();
   return {
     hidden: false,
     inert: false,
@@ -36,7 +41,7 @@ function createElement(width = 0) {
         else classes.delete(name);
       }
     },
-    style: { setProperty() {} },
+    style: { setProperty: (name: string, value: string) => styles.set(name, value), getPropertyValue: (name: string) => styles.get(name) ?? "" },
     setAttribute: (name: string, value: string) => attributes.set(name, value),
     getAttribute: (name: string) => attributes.get(name),
     getBoundingClientRect() { return { width: this.measuredWidth }; },
@@ -61,15 +66,24 @@ function createHarness(savedLayout?: string) {
   const body = createElement();
   const sidebarToggle = createElement();
   const sidebarHandle = createElement();
+  const sidePanelHandle = createElement();
+  const agentPanel = createElement(SFTP_DEFAULT);
+  const historyPanel = createElement(SFTP_DEFAULT);
+  agentPanel.hidden = true;
+  historyPanel.hidden = true;
   const notifications: string[] = [];
   const warnings: unknown[] = [];
+  const fitted: string[] = [];
+  const terminalGroups = createTerminalGroups();
   const context = createContext({
     activeSessions: {},
     activeTabId: null,
+    terminalGroups,
     document: {
       body,
       querySelector: (selector: string) => ({ ".app-container": app, ".sidebar": sidebar }[selector]),
-      getElementById: (id: string) => ({ "btn-sidebar-toggle": sidebarToggle, "sidebar-resize-handle": sidebarHandle }[id])
+      getElementById: (id: string) => ({ "btn-sidebar-toggle": sidebarToggle, "sidebar-resize-handle": sidebarHandle,
+        "side-panel-resize-handle": sidePanelHandle, "automation-panel": agentPanel, "command-history-panel": historyPanel }[id])
     },
     window: { addEventListener() {} },
     localStorage: {
@@ -78,15 +92,16 @@ function createHarness(savedLayout?: string) {
     },
     console: { warn: (...arguments_: unknown[]) => warnings.push(arguments_), error() {} },
     showNotification: (message: string) => notifications.push(message),
-    fitTerminal() {}
+    fitTerminal(session: { id: string }) { fitted.push(session.id); }
   });
-  runInContext(LAYOUT_SOURCE, context);
+  runInContext(PANE_SELECTION_SOURCE + LAYOUT_SOURCE, context);
   const widths = (total: unknown, sidebarWidth: unknown = SIDEBAR_DEFAULT, sftpWidth: unknown = SFTP_DEFAULT, sidebarOpen = true, sftpOpen = true) => {
     Object.assign(context, { total, sidebarWidth, sftpWidth, sidebarOpen, sftpOpen });
     return JSON.parse(JSON.stringify(runInContext("getPanelLayoutWidths(total, sidebarWidth, sftpWidth, sidebarOpen, sftpOpen)", context)));
   };
   const preferences = () => JSON.parse(JSON.stringify(runInContext("panelLayoutPreferences", context)));
-  return { context, app, sidebar, body, sidebarToggle, sidebarHandle, storage, warnings, notifications, widths, preferences };
+  return { context, app, sidebar, body, sidebarToggle, sidebarHandle, sidePanelHandle, agentPanel, historyPanel,
+    storage, warnings, notifications, widths, preferences, terminalGroups, fitted };
 }
 
 test("wide layouts use smaller default panels and preserve terminal space", () => {
@@ -98,6 +113,98 @@ test("wide layouts use smaller default panels and preserve terminal space", () =
     sidebarAutoCollapsed: false,
     sftpAutoCollapsed: false
   });
+});
+
+test("Files, Agent and the History/Snippets panel share every saved width", () => {
+  for (const savedWidth of [220, SFTP_DEFAULT, 420]) {
+    const h = createHarness(JSON.stringify({ sftpWidth: savedWidth }));
+    const files = createElement();
+    const handle = createElement();
+    const container = { ...createElement(), querySelector: (selector: string) => ({ ".sftp-panel": files, ".sftp-resize-handle": handle }[selector]) };
+    const session = { id: "ssh", kind: "ssh", sftpPanelOpen: true, container };
+    Object.assign(h.context, { activeSessions: { ssh: session }, activeTabId: "ssh" });
+    h.context.initPanelLayout();
+    assert.equal(container.style.getPropertyValue("--sftp-panel-width"), `${savedWidth}px`);
+    assert.equal(h.app.style.getPropertyValue("--side-panel-width"), `${savedWidth}px`);
+    for (const panel of [h.agentPanel, h.historyPanel]) {
+      panel.hidden = false;
+      h.context.refreshPanelLayout();
+      assert.equal(h.app.style.getPropertyValue("--side-panel-width"), `${savedWidth}px`);
+      assert.equal(h.sidePanelHandle.getAttribute("aria-valuenow"), String(savedWidth));
+      assert.equal(files.inert, true);
+      assert.equal(panel.inert, false);
+      panel.hidden = true;
+    }
+    h.context.refreshPanelLayout();
+    assert.equal(container.style.getPropertyValue("--sftp-panel-width"), `${savedWidth}px`);
+    assert.equal(files.inert, false);
+    assert.equal(h.sidePanelHandle.hidden, true);
+  }
+});
+
+test("resizing a docked panel persists the width used by other tabs", () => {
+  const h = createHarness();
+  h.agentPanel.hidden = false;
+  h.context.initPanelLayout();
+  h.sidePanelHandle.emit("keydown", { key: "ArrowLeft" });
+  const resized = SFTP_DEFAULT + KEYBOARD_STEP;
+  assert.equal(h.app.style.getPropertyValue("--side-panel-width"), `${resized}px`);
+  assert.equal(JSON.parse(h.storage.get(STORAGE_KEY)!).sftpWidth, resized);
+  h.agentPanel.hidden = true;
+  h.historyPanel.hidden = false;
+  h.context.refreshPanelLayout();
+  assert.equal(h.app.style.getPropertyValue("--side-panel-width"), `${resized}px`);
+});
+
+test("shared panels clamp and collapse together without losing the saved width", () => {
+  const h = createHarness(JSON.stringify({ sidebarWidth: 360, sftpWidth: 420 }));
+  h.app.measuredWidth = PANEL_MINIMUMS_WIDTH;
+  h.agentPanel.hidden = false;
+  h.context.initPanelLayout();
+  assert.equal(h.app.style.getPropertyValue("--side-panel-width"), "220px");
+  h.app.measuredWidth = NARROW_WINDOW;
+  h.context.refreshPanelLayout();
+  assert.equal(h.app.style.getPropertyValue("--side-panel-width"), "0px");
+  assert.equal(h.agentPanel.classList.contains("side-panel-auto-collapsed"), true);
+  assert.equal(h.agentPanel.inert, true);
+  assert.equal(h.sidePanelHandle.hidden, true);
+  h.app.measuredWidth = WIDE_WINDOW;
+  h.context.refreshPanelLayout();
+  assert.equal(h.app.style.getPropertyValue("--side-panel-width"), "420px");
+  assert.equal(h.agentPanel.classList.contains("side-panel-auto-collapsed"), false);
+  assert.equal(h.agentPanel.inert, false);
+  assert.equal(h.preferences().sftpWidth, 420);
+});
+
+test("switching panel tabs preserves the effective width in either split direction", () => {
+  const PANE_WIDTH = 560;
+  const EFFECTIVE_PANEL_WIDTH = PANE_WIDTH - TERMINAL_MINIMUM;
+  for (const direction of ["right", "below"] as const) {
+    const h = createHarness();
+    const files = createElement();
+    const handle = createElement();
+    const container = { ...createElement(PANE_WIDTH), querySelector: (selector: string) => ({ ".sftp-panel": files, ".sftp-resize-handle": handle }[selector]) };
+    const primary = { id: "ssh", kind: "ssh", sftpPanelOpen: true, container };
+    const secondary = { id: "local", kind: "local" };
+    h.terminalGroups.add(primary.id);
+    h.terminalGroups.add(secondary.id);
+    h.terminalGroups.split(primary.id, secondary.id, direction);
+    h.terminalGroups.focus(primary.id);
+    Object.assign(h.context, { activeSessions: { ssh: primary, local: secondary }, activeTabId: primary.id });
+    h.context.refreshPanelLayout();
+    assert.equal(container.style.getPropertyValue("--sftp-panel-width"), `${EFFECTIVE_PANEL_WIDTH}px`);
+    for (const panel of [h.agentPanel, h.historyPanel]) {
+      panel.hidden = false;
+      panel.measuredWidth = EFFECTIVE_PANEL_WIDTH;
+      container.measuredWidth = PANE_WIDTH - EFFECTIVE_PANEL_WIDTH * (direction === "right" ? 0.5 : 1);
+      h.context.refreshPanelLayout();
+      h.context.refreshPanelLayout();
+      assert.equal(h.app.style.getPropertyValue("--side-panel-width"), `${EFFECTIVE_PANEL_WIDTH}px`);
+      assert.equal(h.sidePanelHandle.getAttribute("aria-valuemax"), String(EFFECTIVE_PANEL_WIDTH));
+      panel.hidden = true;
+      container.measuredWidth = PANE_WIDTH;
+    }
+  }
 });
 
 test("panels clamp to their minimums before collapsing", () => {
@@ -208,4 +315,58 @@ test("pointer cancellation restores the stored size while pointer up saves the r
   harness.sidebarHandle.emit("pointermove", { pointerId: 3, clientX: 150 });
   harness.sidebarHandle.emit("pointerup", { pointerId: 3 });
   assert.equal(JSON.parse(harness.storage.get(STORAGE_KEY)!).sidebarWidth, SIDEBAR_DEFAULT + 50);
+});
+
+test("Files follows the focused pane and measures each pane while both visible terminals are fitted", () => {
+  const harness = createHarness();
+  const session = (id: string, width: number) => {
+    const files = createElement();
+    const handle = createElement();
+    const container = { ...createElement(width), querySelector: (selector: string) => ({ ".sftp-panel": files, ".sftp-resize-handle": handle }[selector]) };
+    return { id, kind: "ssh", sftpPanelOpen: true, term: {}, container, files, handle };
+  };
+  const first = session("first", WIDE_PANE_WIDTH);
+  const second = session("second", COMPACT_PANE_WIDTH);
+  harness.terminalGroups.add(first.id);
+  harness.terminalGroups.add(second.id);
+  harness.terminalGroups.split(first.id, second.id, "right");
+  harness.terminalGroups.focus(first.id);
+  Object.assign(harness.context, { activeSessions: { [first.id]: first, [second.id]: second }, activeTabId: first.id });
+  harness.context.refreshPanelLayout();
+  assert.equal(first.container.style.getPropertyValue("--sftp-panel-width"), `${SFTP_DEFAULT}px`);
+  assert.equal(first.files.inert, false);
+  assert.equal(second.container.style.getPropertyValue("--sftp-panel-width"), "0px");
+  assert.equal(second.files.inert, true);
+  assert.equal(second.container.classList.contains("pane-files-hidden"), true);
+  assert.deepEqual(harness.fitted, [first.id, second.id]);
+
+  harness.terminalGroups.focus(second.id);
+  harness.context.refreshPanelLayout();
+  assert.equal(first.files.inert, true);
+  assert.equal(first.container.classList.contains("pane-files-hidden"), true);
+  assert.equal(second.container.classList.contains("pane-files-hidden"), false);
+  assert.equal(second.container.classList.contains("sftp-auto-collapsed"), true);
+  assert.equal(second.container.style.getPropertyValue("--sftp-panel-width"), "0px");
+
+  second.container.measuredWidth = WIDE_PANE_WIDTH;
+  harness.context.refreshPanelLayout();
+  assert.equal(second.container.style.getPropertyValue("--sftp-panel-width"), `${SFTP_DEFAULT}px`);
+  assert.equal(second.files.inert, false);
+  assert.equal(second.container.classList.contains("sftp-auto-collapsed"), false);
+});
+
+test("the Files separator advertises only the width available inside its focused split pane", () => {
+  const harness = createHarness();
+  const handle = createElement();
+  const files = createElement();
+  const container = { ...createElement(WIDE_PANE_WIDTH), querySelector: (selector: string) => ({ ".sftp-panel": files, ".sftp-resize-handle": handle }[selector]) };
+  const first = { id: "first", kind: "ssh", sftpPanelOpen: true, term: {}, container };
+  const second = { id: "second", kind: "local", term: {} };
+  harness.terminalGroups.add(first.id);
+  harness.terminalGroups.add(second.id);
+  harness.terminalGroups.split(first.id, second.id, "right");
+  harness.terminalGroups.focus(first.id);
+  Object.assign(harness.context, { activeSessions: { [first.id]: first, [second.id]: second }, activeTabId: first.id });
+  harness.context.refreshPanelLayout();
+  assert.equal(handle.getAttribute("aria-valuemax"), String(WIDE_PANE_WIDTH - TERMINAL_MINIMUM));
 });

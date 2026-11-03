@@ -4,9 +4,12 @@ import test from "node:test";
 import { createContext, runInContext } from "node:vm";
 import { parseHTML } from "linkedom";
 import { initAutomation } from "../src/automation.ts";
+import { createTerminalGroups } from "../src/terminal-panes.ts";
 
 const MAX_PROMPT_CHARACTERS = 16_000;
 const MAX_OUTPUT_CHARACTERS = 200_000;
+const MAX_OUTPUT_BLOCKS = 200;
+const MAX_TRANSCRIPT_STORAGE_CHARACTERS = 2_000_000;
 const TARGET = Object.freeze({ sessionId: "ssh-transport-1", label: "Production · deploy@example.test:22" });
 const PROVIDERS = [
   { id: "claude", name: "Claude Code", available: true, executable: "C:\\agents\\claude.exe" },
@@ -36,6 +39,10 @@ function createStorage() {
 
 function contextStorageKey(target: SshTarget, provider = "claude") {
   return "sleekssh_automation_conversation:" + JSON.stringify([target.contextKey ?? target.sessionId, provider]);
+}
+
+function transcriptStorageKey(target: SshTarget, provider: string, conversationId: string) {
+  return "sleekssh_automation_transcript:" + JSON.stringify([target.contextKey ?? target.sessionId, provider, conversationId]);
 }
 
 class Control {
@@ -77,7 +84,7 @@ function nextTurn() {
   return new Promise<void>(resolve => setImmediate(resolve));
 }
 
-async function createHarness(configuration: { invoke?: InvokeHandler; target?: SshTarget | null; listenError?: string; storage?: ConversationStorage; missingControl?: string } = {}) {
+async function createHarness(configuration: { invoke?: InvokeHandler; target?: SshTarget | null; getSelectedTarget?: () => SshTarget | null; listenError?: string; storage?: ConversationStorage; missingControl?: string; onCommandExecuted?: Parameters<typeof initAutomation>[0]["onCommandExecuted"] } = {}) {
   const controls = new Map<string, Control>();
   const control = (id: string) => {
     if (!controls.has(id)) controls.set(id, new Control());
@@ -93,16 +100,18 @@ async function createHarness(configuration: { invoke?: InvokeHandler; target?: S
   let runSequence = 0;
   const panel = initAutomation({
     document: { getElementById: (id: string) => configuration.missingControl === id ? null : control(id), createElement: () => new Control() } as unknown as Document,
-    getSelectedTarget: () => selectedTarget,
+    getSelectedTarget: configuration.getSelectedTarget ?? (() => selectedTarget),
     createRunId: () => `run-${++runSequence}`,
     storage: configuration.storage ?? null,
     onLayoutChange: () => { layoutChanges += 1; },
+    onCommandExecuted: configuration.onCommandExecuted,
     async invoke(command, arguments_) {
       const invocation = { command, arguments_ };
       calls.push(invocation);
       if (configuration.invoke) return configuration.invoke(invocation);
       if (command === "list_automation_providers") return PROVIDERS;
       if (command === "list_local_agent_sessions") return LOCAL_CHAT_LISTING;
+      if (command === "get_local_agent_history") return { messages: [], truncated: false };
     },
     async listen(name, callback) {
       assert.equal(name, "ssh-automation-event");
@@ -152,6 +161,7 @@ test("empty, whitespace, oversized, and missing-target tasks cannot start", asyn
     await harness.task(prompt);
     assert.equal(harness.control("automation-start").disabled, true);
     await harness.start();
+    assert.equal(harness.control("automation-prompt").value, prompt);
   }
   await harness.task("x".repeat(MAX_PROMPT_CHARACTERS));
   assert.equal(harness.control("automation-start").disabled, false);
@@ -171,6 +181,7 @@ for (const provider of ["claude", "codex"]) {
     assert.deepEqual(harness.calls.find(call => call.command === "start_ssh_automation")?.arguments_, {
       runId: "run-1", sessionId: TARGET.sessionId, provider, prompt: "inspect nginx", resumeSessionId: null,
     });
+    assert.equal(harness.control("automation-prompt").value, "");
     assert.equal(harness.control("automation-provider").disabled, true);
     assert.equal(harness.control("automation-stop").disabled, false);
     assert.equal(harness.control("automation-panel").dataset.running, "true");
@@ -179,6 +190,43 @@ for (const provider of ["claude", "codex"]) {
     assert.equal(harness.calls.filter(call => call.command === "start_ssh_automation").length, 1);
   });
 }
+
+for (const provider of ["claude", "codex"]) {
+  for (const rejected of [false, true]) {
+    test(`${provider} clears the submitted draft immediately and ${rejected ? "restores it on startup failure" : "keeps it clear on startup success"}`, async () => {
+      const startup = Promise.withResolvers<unknown>();
+      const harness = await createHarness({ invoke: async ({ command }) => {
+        if (command === "list_automation_providers") return PROVIDERS;
+        if (command === "start_ssh_automation") return startup.promise;
+      } });
+      harness.control("automation-provider").value = provider;
+      await harness.control("automation-provider").dispatch("change");
+      const draft = "  Inspect nginx\nthen explain the result.\n  ";
+      await harness.task(draft);
+      const started = harness.start();
+      assert.equal(harness.control("automation-prompt").value, "");
+      assert.equal(harness.control("automation-prompt").disabled, false);
+      assert.equal(harness.calls.find(call => call.command === "start_ssh_automation")?.arguments_?.prompt, draft.trim());
+      assert.match(harness.control("automation-output").textContent, /Inspect nginx\nthen explain the result\./);
+      if (rejected) startup.reject(new Error("CLI unavailable"));
+      else startup.resolve(undefined);
+      await started;
+      assert.equal(harness.control("automation-prompt").value, rejected ? draft : "");
+      assert.equal(harness.control("automation-start").disabled, !rejected);
+      if (rejected) assert.match(harness.control("automation-status").textContent, /CLI unavailable/);
+    });
+  }
+}
+
+test("a maximum-length submitted task clears the composer and remains in the transcript", async () => {
+  const harness = await createHarness();
+  const draft = "x".repeat(MAX_PROMPT_CHARACTERS);
+  await harness.task(draft);
+  await harness.start();
+  assert.equal(harness.control("automation-prompt").value, "");
+  assert.equal(harness.calls.find(call => call.command === "start_ssh_automation")?.arguments_?.prompt, draft);
+  assert.equal(harness.control("automation-output").textContent, `Task: ${draft}`);
+});
 
 test("running target is pinned across tab changes and ignores stale or cross-server events", async () => {
   const harness = await createHarness();
@@ -297,12 +345,16 @@ for (const kind of ["completed", "failed", "cancelled"]) {
     harness.emit("command", "Executing", { command: "hostname" });
     assert.match(harness.control("automation-output").textContent, /\$ hostname/);
     harness.emit(kind, `Task ${kind}.`);
-    assert.equal(harness.control("automation-start").disabled, false);
+    assert.equal(harness.control("automation-prompt").value, "");
+    assert.equal(harness.control("automation-prompt").disabled, false);
+    assert.equal(harness.control("automation-start").disabled, true);
     assert.equal(harness.control("automation-panel").dataset.running, "false");
     assert.equal(harness.control("automation-status").dataset.error, String(kind === "failed"));
     const transcript = harness.control("automation-output").textContent;
     harness.emit("output", "late output");
     assert.equal(harness.control("automation-output").textContent, transcript);
+    await harness.task("Inspect the next service");
+    assert.equal(harness.control("automation-start").disabled, false);
   });
 }
 
@@ -603,34 +655,79 @@ test("approval decisions and run endings appear as single marker lines", async (
   ]);
 });
 
-test("Ctrl+Enter in the task box starts a run and plain Enter does not", async () => {
-  const harness = await createHarness();
-  await harness.task("inspect nginx");
-  const keydown = (modifiers: { ctrlKey?: boolean; metaKey?: boolean }) => {
-    const event = new Event("keydown", { cancelable: true });
-    Object.defineProperties(event, { key: { value: "Enter" }, ctrlKey: { value: Boolean(modifiers.ctrlKey) }, metaKey: { value: Boolean(modifiers.metaKey) }, isComposing: { value: false } });
-    return event;
-  };
-  await harness.control("automation-prompt").dispatch("keydown", keydown({}));
-  assert.equal(harness.calls.filter(call => call.command === "start_ssh_automation").length, 0);
-  const submit = keydown({ ctrlKey: true });
-  await harness.control("automation-prompt").dispatch("keydown", submit);
-  assert.equal(submit.defaultPrevented, true);
-  assert.equal(harness.calls.filter(call => call.command === "start_ssh_automation").length, 1);
+test("Enter sends the task, while Shift+Enter and composing input preserve native editing", async () => {
+    const harness = await createHarness();
+    const keydown = (modifiers: { shiftKey?: boolean; isComposing?: boolean; altKey?: boolean } = {}) => {
+      const event = new Event("keydown", { cancelable: true });
+      Object.defineProperties(event, { key: { value: "Enter" }, shiftKey: { value: Boolean(modifiers.shiftKey) }, altKey: { value: Boolean(modifiers.altKey) }, isComposing: { value: Boolean(modifiers.isComposing) } });
+      return event;
+    };
+    await harness.task("inspect nginx\nand explain the result");
+    for (const modifiers of [{ shiftKey: true }, { isComposing: true }, { altKey: true }]) {
+      const edit = keydown(modifiers);
+      await harness.control("automation-prompt").dispatch("keydown", edit);
+      assert.equal(edit.defaultPrevented, false);
+      assert.equal(harness.calls.filter(call => call.command === "start_ssh_automation").length, 0);
+      assert.equal(harness.control("automation-prompt").value, "inspect nginx\nand explain the result");
+    }
+    const submit = keydown();
+    await harness.control("automation-prompt").dispatch("keydown", submit);
+    assert.equal(submit.defaultPrevented, true);
+    assert.equal(harness.calls.filter(call => call.command === "start_ssh_automation").length, 1);
+    assert.equal(harness.control("automation-prompt").value, "");
+    harness.panel.dispose();
 });
 
-test("the status bar toggle names the agent state", async () => {
+for (const modifier of ["ctrlKey", "metaKey"]) {
+  test(`${modifier}+Enter does not send a task when there is no run to steer`, async () => {
+    const harness = await createHarness();
+    await harness.task("Draft instruction");
+    const event = new Event("keydown", { cancelable: true });
+    Object.defineProperties(event, { key: { value: "Enter" }, [modifier]: { value: true } });
+    await harness.control("automation-prompt").dispatch("keydown", event);
+    assert.equal(event.defaultPrevented, true);
+    assert.equal(harness.calls.some(call => call.command === "start_ssh_automation" || call.command === "stop_ssh_automation"), false);
+    assert.equal(harness.control("automation-prompt").value, "Draft instruction");
+    harness.panel.dispose();
+  });
+}
+
+test("routine composer status remains available to assistive technology while errors stay visible", async () => {
+  const harness = await createHarness({ invoke: async ({ command }) => {
+    if (command === "list_automation_providers") return PROVIDERS;
+    if (command === "start_ssh_automation") throw new Error("CLI unavailable");
+  } });
+  assert.equal(harness.control("automation-status").className, "automation-status sr-only");
+  await harness.task(); await harness.start();
+  assert.equal(harness.control("automation-status").className, "automation-status");
+  assert.match(harness.control("automation-status").textContent, /CLI unavailable/);
+  harness.panel.dispose();
+});
+
+test("the status bar uses an accessible indeterminate bar while the agent runs", async () => {
   const harness = await createHarness();
   assert.equal(harness.control("btn-automation-toggle").textContent, "Agent idle");
   assert.equal(harness.control("btn-automation-toggle").dataset.state, "idle");
   await harness.task();
   await harness.start();
-  assert.equal(harness.control("btn-automation-toggle").textContent, "Agent running");
+  const toggle = harness.control("btn-automation-toggle");
+  assert.equal(toggle.textContent, "");
+  assert.equal(toggle.attributes.get("aria-label"), "Agent running");
+  assert.equal(toggle.attributes.get("title"), "Agent running");
+  const progress = toggle.children[0];
+  assert.equal(progress.attributes.get("role"), "progressbar");
+  assert.equal(progress.attributes.get("aria-label"), "Agent running");
+  assert.equal(progress.attributes.has("aria-valuenow"), false);
+  harness.emit("output", "Still working");
+  assert.equal(toggle.children[0], progress);
   assert.equal(harness.control("btn-automation-toggle").dataset.state, "running");
   harness.emit("approval", "Review", { request_id: "approval-1", command: "uptime" });
   assert.equal(harness.control("btn-automation-toggle").textContent, "Approval needed");
+  assert.equal(toggle.children.length, 0);
   harness.emit("completed", "Done");
   assert.equal(harness.control("btn-automation-toggle").textContent, "Agent idle");
+  assert.equal(toggle.attributes.get("aria-label"), "Agent idle");
+  harness.panel.dispose();
 });
 
 test("safe Markdown links open through the native opener without navigating the app", async () => {
@@ -693,12 +790,13 @@ test("many short output blocks stay bounded and keep a single trim notice", asyn
   assert.match(output.textContent, new RegExp(`record-${MAX_OUTPUT_BLOCKS + 3}\\n$`));
 });
 
-test("a new task clears rendered Markdown and the trim notice", async () => {
+test("explicit New chat clears rendered Markdown and the trim notice", async () => {
   const harness = await createHarness();
   await harness.task();
   await harness.start();
   harness.emit("output", "# Old report\n\n" + "x".repeat(MAX_OUTPUT_CHARACTERS));
   harness.emit("completed", "Done");
+  await harness.control("automation-new-chat").dispatch("click");
   await harness.task("A fresh task");
   await harness.start();
   const output = harness.control("automation-output");
@@ -716,26 +814,61 @@ test("missing automation controls fail explicitly", () => {
   }), /SSH automation control is missing/);
 });
 
-test("main integration rejects local, disconnected, and reconnecting sessions", () => {
+function createMainTargetHarness() {
   const source = readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
   const initSource = source.slice(source.indexOf("function initAutomationPanel()"), source.indexOf("// --- PANEL LAYOUT ---"));
-  let getSelectedTarget: (() => unknown) | undefined;
+  const paneSelectionSource = source.slice(source.indexOf("function getActiveSession()"), source.indexOf("function activateSession("));
+  const terminalGroups = createTerminalGroups();
+  terminalGroups.add("tab");
+  let getSelectedTarget: (() => SshTarget | null) | undefined;
   const context = createContext({
-    window: { SleekSshAutomation: { initAutomation(options: { getSelectedTarget: () => unknown }) { getSelectedTarget = options.getSelectedTarget; } } },
+    window: { SleekSshAutomation: { initAutomationSessions(options: { getSelectedSessionKey: () => string | null; getTargetForSession: (key: string) => SshTarget | null }) {
+      getSelectedTarget = () => { const key = options.getSelectedSessionKey(); return key ? options.getTargetForSession(key) : null; };
+    } } },
+    terminalGroups,
     invoke() {}, listen() {},
   });
-  runInContext(`let automationPanel; let activeTabId = 'tab'; let activeSessions = {}; ${initSource}; initAutomationPanel();`, context);
-  assert.equal(getSelectedTarget!(), null);
+  runInContext(`let automationPanel; let activeTabId = 'tab'; let activeSessions = {}; ${paneSelectionSource} ${initSource}; initAutomationPanel();`, context);
+  return { context, terminalGroups, getSelectedTarget() { assert.ok(getSelectedTarget); return getSelectedTarget(); } };
+}
+
+test("main integration rejects local, disconnected, and reconnecting sessions", () => {
+  const { context, getSelectedTarget } = createMainTargetHarness();
+  assert.equal(getSelectedTarget(), null);
   for (const update of [
     { kind: "local" }, { connectionStatus: "disconnected" }, { connectionStatus: "reconnecting" },
     { isClosed: true }, { isClosing: true }, { isConnecting: true }, { connectionId: null },
   ]) {
     context.sessionUpdate = update;
-    runInContext(`activeSessions.tab = { kind: 'ssh', connectionId: 'transport', connectionStatus: 'connected', name: 'Test', host: 'server', connectionProfile: { username: 'test', port: 22 }, ...sessionUpdate };`, context);
-    assert.equal(getSelectedTarget!(), null);
+    runInContext(`activeSessions.tab = { id: 'tab', kind: 'ssh', connectionId: 'transport', connectionStatus: 'connected', name: 'Test', host: 'server', connectionProfile: { username: 'test', port: 22 }, ...sessionUpdate };`, context);
+    assert.equal(getSelectedTarget(), null);
   }
-  runInContext(`activeSessions.tab = { kind: 'ssh', connectionId: 'transport', connectionStatus: 'connected', name: 'Test', host: 'server', connectionProfile: { username: 'test', port: 22 } };`, context);
-  assert.deepEqual(JSON.parse(JSON.stringify(getSelectedTarget!())), { sessionId: "transport", label: "Test · test@server:22", contextKey: '["","test","server",22]' });
+  runInContext(`activeSessions.tab = { id: 'tab', kind: 'ssh', connectionId: 'transport', connectionStatus: 'connected', name: 'Test', host: 'server', connectionProfile: { username: 'test', port: 22 } };`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(getSelectedTarget())), { sessionId: "transport", label: "Test · test@server:22", contextKey: '["","test","server",22]' });
+});
+
+test("new agent tasks bind the focused secondary SSH pane and retain that target after focus moves", async () => {
+  const main = createMainTargetHarness();
+  main.terminalGroups.add("secondary");
+  main.terminalGroups.split("tab", "secondary", "right");
+  runInContext(`activeSessions = {
+    tab: { id: 'tab', kind: 'ssh', connectionId: 'first-transport', connectionStatus: 'connected', name: 'First', host: 'first.test', connectionProfile: { id: 'first', username: 'deploy', port: 22 } },
+    secondary: { id: 'secondary', kind: 'ssh', connectionId: 'second-transport', connectionStatus: 'connected', name: 'Second', host: 'second.test', connectionProfile: { id: 'second', username: 'deploy', port: 22 } }
+  };`, main.context);
+  const harness = await createHarness({ getSelectedTarget: main.getSelectedTarget });
+  await harness.task("Inspect the focused pane");
+  await harness.start();
+  assert.equal(harness.calls.find(call => call.command === "start_ssh_automation")?.arguments_?.sessionId, "second-transport");
+  assert.equal(harness.control("automation-target").textContent, "Second · deploy@second.test:22 · Target locked for this run");
+
+  main.terminalGroups.focus("tab");
+  harness.panel.refresh();
+  assert.equal(harness.control("automation-target").textContent, "Second · deploy@second.test:22 · Target locked for this run");
+  harness.emit("completed", "Done", { session_id: "second-transport" });
+  await harness.task("Inspect the newly focused pane");
+  await harness.start();
+  assert.deepEqual(harness.calls.filter(call => call.command === "start_ssh_automation").map(call => call.arguments_?.sessionId),
+    ["second-transport", "first-transport"]);
 });
 
 test("an existing local conversation ID is passed explicitly and pinned during a run", async () => {
@@ -765,10 +898,500 @@ test("session events remember the CLI conversation for follow-up tasks and recon
   harness.emit("completed", "Done");
   harness.selectTarget({ ...target, sessionId: "reconnected-transport" });
   assert.equal(harness.control("automation-conversation").value, CONVERSATION_ID);
+  await harness.task("Continue the investigation after reconnecting");
   await harness.start();
   assert.equal(harness.calls.filter(call => call.command === "start_ssh_automation").at(-1)?.arguments_?.resumeSessionId, CONVERSATION_ID);
   const reopened = await createHarness({ storage, target: { ...target, sessionId: "new-app-transport" } });
   assert.equal(reopened.control("automation-conversation").value, CONVERSATION_ID);
+});
+
+test("follow-up tasks retain both turns and resume the same conversation", async () => {
+  const harness = await createHarness({ storage: createStorage() });
+  await harness.task("Investigate the first failure");
+  await harness.start();
+  harness.emit("session", CONVERSATION_ID);
+  harness.emit("output", "The first failure is a missing configuration.\n");
+  harness.emit("completed", "First investigation complete");
+  await harness.task("Explain how to fix that configuration");
+  await harness.start();
+  harness.emit("session", CONVERSATION_ID);
+  harness.emit("output", "Update the existing configuration.\n");
+  harness.emit("completed", "Follow-up complete");
+  const starts = harness.calls.filter(call => call.command === "start_ssh_automation");
+  assert.equal(starts.length, 2);
+  assert.equal(starts[0].arguments_?.resumeSessionId, null);
+  assert.equal(starts[1].arguments_?.resumeSessionId, CONVERSATION_ID);
+  const transcript = harness.control("automation-output").textContent;
+  assert.match(transcript, /Investigate the first failure/);
+  assert.match(transcript, /The first failure is a missing configuration/);
+  assert.match(transcript, /Explain how to fix that configuration/);
+  assert.match(transcript, /Update the existing configuration/);
+});
+
+test("saved transcripts restore after reopening and reconnecting to the same server", async () => {
+  const storage = createStorage();
+  const target = { ...TARGET, contextKey: "persistent-server-context" };
+  const harness = await createHarness({ storage, target });
+  await harness.task("Inspect the saved service");
+  await harness.start();
+  harness.emit("session", CONVERSATION_ID);
+  harness.emit("command", "Inspect service", { command: "systemctl status nginx" });
+  harness.emit("command_output", "active (running)\nExit status: 0\n");
+  harness.emit("output", "## Saved result\n\nThe service is healthy.\n");
+  harness.emit("completed", "Inspection complete");
+  const transcript = harness.control("automation-output").textContent;
+  harness.panel.dispose();
+  const reopened = await createHarness({ storage, target: { ...target, sessionId: "new-transport" } });
+  assert.equal(reopened.control("automation-conversation").value, CONVERSATION_ID);
+  assert.equal(reopened.control("automation-output").textContent, transcript);
+  assert.equal(reopened.control("automation-output").querySelector("h2")?.textContent, "Saved result");
+  assert.equal(reopened.control("automation-output").children.find(block => block.className === "automation-output-command")?.dataset.state, "ok");
+  reopened.selectTarget(null);
+  assert.doesNotMatch(reopened.control("automation-output").textContent, /The service is healthy/);
+  reopened.selectTarget({ ...target, sessionId: "reconnected-transport" });
+  assert.equal(reopened.control("automation-output").textContent, transcript);
+});
+
+test("New chat clears the visible transcript and selecting its previous chat restores history", async () => {
+  const storage = createStorage();
+  const harness = await createHarness({ storage });
+  await harness.task("Original chat question");
+  await harness.start();
+  harness.emit("session", CONVERSATION_ID);
+  harness.emit("output", "Original chat answer.\n");
+  harness.emit("completed", "Done");
+  const transcript = harness.control("automation-output").textContent;
+  await harness.control("automation-new-chat").dispatch("click");
+  assert.equal(harness.control("automation-conversation").value, "");
+  assert.doesNotMatch(harness.control("automation-output").textContent, /Original chat/);
+  harness.control("automation-chat").value = CONVERSATION_ID;
+  await harness.control("automation-chat").dispatch("change");
+  assert.equal(harness.control("automation-output").textContent, transcript);
+  harness.panel.dispose();
+  const reopened = await createHarness({ storage });
+  assert.equal(reopened.control("automation-conversation").value, CONVERSATION_ID);
+  assert.equal(reopened.control("automation-output").textContent, transcript);
+});
+
+test("a newly returned chat remains in the picker after New chat and resumes with its transcript", async () => {
+  const harness = await createHarness({ storage: createStorage() });
+  await harness.control("btn-automation-toggle").dispatch("click");
+  await nextTurn();
+  assert.equal(harness.control("automation-chat").children.some(option => option.value === OTHER_CONVERSATION_ID), false);
+  await harness.task("Investigate the newly created chat");
+  await harness.start();
+  harness.emit("session", OTHER_CONVERSATION_ID);
+  harness.emit("output", "The newly created chat has its own saved answer.\n");
+  harness.emit("completed", "Done");
+  const transcript = harness.control("automation-output").textContent;
+  await harness.control("automation-new-chat").dispatch("click");
+  const previousChat = harness.control("automation-chat").children.find(option => option.value === OTHER_CONVERSATION_ID);
+  assert.match(previousChat?.textContent ?? "", /Investigate the newly created chat/);
+  assert.equal(harness.calls.filter(call => call.command === "list_local_agent_sessions").length, 1);
+  harness.control("automation-chat").value = previousChat!.value;
+  await harness.control("automation-chat").dispatch("change");
+  assert.equal(harness.control("automation-output").textContent, transcript);
+  await harness.task("Follow up in that newly created chat");
+  await harness.start();
+  assert.equal(harness.calls.filter(call => call.command === "start_ssh_automation").at(-1)?.arguments_?.resumeSessionId, OTHER_CONVERSATION_ID);
+  assert.match(harness.control("automation-output").textContent, /The newly created chat has its own saved answer/);
+});
+
+test("an older pending chat scan cannot remove a newly returned chat after New chat", async () => {
+  const listing = Promise.withResolvers<unknown>();
+  const harness = await createHarness({ invoke: async ({ command }) => {
+    if (command === "list_automation_providers") return PROVIDERS;
+    if (command === "list_local_agent_sessions") return listing.promise;
+  } });
+  await harness.control("btn-automation-toggle").dispatch("click");
+  await harness.task("Keep the newly returned chat in the picker");
+  await harness.start();
+  harness.emit("session", OTHER_CONVERSATION_ID);
+  harness.emit("output", "New chat retained while its older scan is pending.\n");
+  harness.emit("completed", "Done");
+  await harness.control("automation-new-chat").dispatch("click");
+  listing.resolve(LOCAL_CHAT_LISTING);
+  await nextTurn();
+  const returnedChat = harness.control("automation-chat").children.find(option => option.value === OTHER_CONVERSATION_ID);
+  assert.match(returnedChat?.textContent ?? "", /Keep the newly returned chat in the picker/);
+  harness.control("automation-chat").value = returnedChat!.value;
+  await harness.control("automation-chat").dispatch("change");
+  assert.match(harness.control("automation-output").textContent, /New chat retained while its older scan is pending/);
+});
+
+test("visible transcripts stay isolated by provider, server, and selected chat", async () => {
+  const harness = await createHarness({ storage: createStorage() });
+  await harness.task("Claude server-one question");
+  await harness.start();
+  harness.emit("session", CONVERSATION_ID);
+  harness.emit("output", "Claude server-one answer.\n");
+  harness.emit("completed", "Done");
+  const claudeTranscript = harness.control("automation-output").textContent;
+  harness.control("automation-provider").value = "codex";
+  await harness.control("automation-provider").dispatch("change");
+  assert.doesNotMatch(harness.control("automation-output").textContent, /Claude server-one/);
+  await harness.task("Codex server-one question");
+  await harness.start();
+  harness.emit("session", OTHER_CONVERSATION_ID);
+  harness.emit("output", "Codex server-one answer.\n");
+  harness.emit("completed", "Done");
+  const codexTranscript = harness.control("automation-output").textContent;
+  harness.selectTarget({ sessionId: "other-server", label: "Other server" });
+  assert.doesNotMatch(harness.control("automation-output").textContent, /server-one/);
+  harness.selectTarget(TARGET);
+  assert.equal(harness.control("automation-output").textContent, codexTranscript);
+  harness.control("automation-provider").value = "claude";
+  await harness.control("automation-provider").dispatch("change");
+  assert.equal(harness.control("automation-output").textContent, claudeTranscript);
+  harness.control("automation-chat").value = OTHER_CONVERSATION_ID;
+  await harness.control("automation-chat").dispatch("change");
+  assert.doesNotMatch(harness.control("automation-output").textContent, /server-one/);
+  harness.control("automation-chat").value = CONVERSATION_ID;
+  await harness.control("automation-chat").dispatch("change");
+  assert.equal(harness.control("automation-output").textContent, claudeTranscript);
+});
+
+test("a run finishing after a server switch saves the transcript to its pinned server", async () => {
+  const harness = await createHarness({ storage: createStorage() });
+  await harness.task("Pinned server investigation");
+  await harness.start();
+  harness.emit("session", CONVERSATION_ID);
+  harness.selectTarget({ sessionId: "other-server", label: "Other server" });
+  harness.emit("output", "Pinned server result.\n");
+  harness.emit("completed", "Pinned run finished");
+  assert.doesNotMatch(harness.control("automation-output").textContent, /Pinned server/);
+  harness.selectTarget(TARGET);
+  assert.match(harness.control("automation-output").textContent, /Pinned server investigation/);
+  assert.match(harness.control("automation-output").textContent, /Pinned server result/);
+  assert.match(harness.control("automation-output").textContent, /Pinned run finished/);
+});
+
+for (const selection of ["dropdown", "manual"]) {
+  test(`${selection} chat selection persists before any task starts`, async () => {
+    const storage = createStorage();
+    const harness = await createHarness({ storage });
+    const control = harness.control(selection === "dropdown" ? "automation-chat" : "automation-conversation");
+    control.value = CONVERSATION_ID;
+    await control.dispatch(selection === "dropdown" ? "change" : "input");
+    harness.panel.dispose();
+    const reopened = await createHarness({ storage });
+    assert.equal(reopened.control("automation-conversation").value, CONVERSATION_ID);
+    assert.equal(reopened.control("automation-chat").value, CONVERSATION_ID);
+    assert.equal(harness.calls.some(call => call.command === "start_ssh_automation"), false);
+  });
+}
+
+test("selecting an external chat loads its native history before accepting a follow-up", async () => {
+  const response = Promise.withResolvers<unknown>();
+  const harness = await createHarness({ invoke: async ({ command }) => {
+    if (command === "list_automation_providers") return PROVIDERS;
+    if (command === "get_local_agent_history") return response.promise;
+  } });
+  await harness.task("Continue the existing diagnosis");
+  harness.control("automation-chat").value = CONVERSATION_ID;
+  await harness.control("automation-chat").dispatch("change");
+  assert.deepEqual(harness.calls.find(call => call.command === "get_local_agent_history")?.arguments_, {
+    provider: "claude", sessionId: CONVERSATION_ID,
+  });
+  assert.equal(harness.control("automation-start").disabled, true);
+  assert.match(harness.control("automation-chat-help").textContent, /Loading conversation history/);
+  await harness.start();
+  assert.equal(harness.calls.some(call => call.command === "start_ssh_automation"), false);
+  response.resolve({ messages: [
+    { role: "user", text: "What caused the original failure?" },
+    { role: "assistant", text: "## Diagnosis\n\nA configuration is missing." },
+  ], truncated: false });
+  await nextTurn();
+  assert.equal(harness.control("automation-start").disabled, false);
+  assert.match(harness.control("automation-output").textContent, /What caused the original failure/);
+  assert.equal(harness.control("automation-output").querySelector("h2")?.textContent, "Diagnosis");
+  await harness.start();
+  assert.equal(harness.calls.find(call => call.command === "start_ssh_automation")?.arguments_?.resumeSessionId, CONVERSATION_ID);
+  assert.match(harness.control("automation-output").textContent, /A configuration is missing/);
+  assert.match(harness.control("automation-output").textContent, /Continue the existing diagnosis/);
+});
+
+for (const change of ["chat", "provider", "server"]) {
+  test(`a stale native history response cannot replace a newly selected ${change}`, async () => {
+    const storage = createStorage();
+    const otherTarget = { sessionId: "other-server", label: "Other server" };
+    storage.setItem(contextStorageKey(TARGET, "codex"), JSON.stringify(OTHER_CONVERSATION_ID));
+    storage.setItem(contextStorageKey(otherTarget), JSON.stringify(OTHER_CONVERSATION_ID));
+    const requests: Array<ReturnType<typeof Promise.withResolvers<unknown>>> = [];
+    const harness = await createHarness({ storage, invoke: async ({ command }) => {
+      if (command === "list_automation_providers") return PROVIDERS;
+      if (command === "get_local_agent_history") {
+        const request = Promise.withResolvers<unknown>();
+        requests.push(request);
+        return request.promise;
+      }
+    } });
+    await harness.task("Continue selected chat");
+    harness.control("automation-chat").value = CONVERSATION_ID;
+    await harness.control("automation-chat").dispatch("change");
+    if (change === "chat") {
+      harness.control("automation-chat").value = OTHER_CONVERSATION_ID;
+      await harness.control("automation-chat").dispatch("change");
+    } else if (change === "provider") {
+      harness.control("automation-provider").value = "codex";
+      await harness.control("automation-provider").dispatch("change");
+    } else {
+      harness.selectTarget(otherTarget);
+    }
+    assert.equal(requests.length, 2);
+    requests[0].resolve({ messages: [{ role: "assistant", text: "Stale chat history" }], truncated: false });
+    await nextTurn();
+    assert.doesNotMatch(harness.control("automation-output").textContent, /Stale chat history/);
+    assert.equal(harness.control("automation-start").disabled, true);
+    requests[1].resolve({ messages: [{ role: "assistant", text: "Selected chat history" }], truncated: false });
+    await nextTurn();
+    assert.match(harness.control("automation-output").textContent, /Selected chat history/);
+    assert.doesNotMatch(harness.control("automation-output").textContent, /Stale chat history/);
+    assert.equal(harness.control("automation-start").disabled, false);
+  });
+}
+
+test("native history failure is visible while still permitting the selected chat to resume", async () => {
+  const harness = await createHarness({ invoke: async ({ command }) => {
+    if (command === "list_automation_providers") return PROVIDERS;
+    if (command === "get_local_agent_history") throw new Error("History file is unavailable");
+  } });
+  await harness.task("Continue without the visible transcript");
+  harness.control("automation-chat").value = CONVERSATION_ID;
+  await harness.control("automation-chat").dispatch("change");
+  await nextTurn();
+  assert.match(harness.control("automation-chat-help").textContent, /Could not load conversation history.*History file is unavailable/);
+  assert.equal(harness.control("automation-chat-help").dataset.error, "true");
+  assert.equal(harness.control("automation-start").disabled, false);
+  await harness.start();
+  assert.equal(harness.calls.find(call => call.command === "start_ssh_automation")?.arguments_?.resumeSessionId, CONVERSATION_ID);
+});
+
+for (const retry of ["reopen", "refresh"]) {
+  test(`${retry} retries a failed native history load for the selected conversation`, async () => {
+    let historyAttempts = 0;
+    const harness = await createHarness({ invoke: async ({ command }) => {
+      if (command === "list_automation_providers") return PROVIDERS;
+      if (command === "list_local_agent_sessions") return LOCAL_CHAT_LISTING;
+      if (command === "get_local_agent_history") {
+        historyAttempts += 1;
+        if (historyAttempts === 1) throw new Error("Temporary history read failure");
+        return { messages: [{ role: "assistant", text: "Recovered selected conversation history" }], truncated: false };
+      }
+    } });
+    await harness.control("btn-automation-toggle").dispatch("click");
+    await nextTurn();
+    harness.control("automation-chat").value = CONVERSATION_ID;
+    await harness.control("automation-chat").dispatch("change");
+    await nextTurn();
+    assert.equal(historyAttempts, 1);
+    assert.match(harness.control("automation-chat-help").textContent, /Temporary history read failure/);
+    if (retry === "reopen") {
+      await harness.control("automation-close").dispatch("click");
+      await harness.control("btn-automation-toggle").dispatch("click");
+    } else {
+      await harness.control("automation-refresh-chats").dispatch("click");
+    }
+    await nextTurn();
+    assert.equal(historyAttempts, 2);
+    assert.equal(harness.control("automation-conversation").value, CONVERSATION_ID);
+    assert.match(harness.control("automation-output").textContent, /Recovered selected conversation history/);
+    assert.doesNotMatch(harness.control("automation-chat-help").textContent, /Temporary history read failure/);
+    assert.equal(harness.control("automation-chat-help").dataset.error, "false");
+  });
+}
+
+const INVALID_NATIVE_HISTORIES: unknown[] = [
+  null, {}, { messages: null, truncated: false }, { messages: [], truncated: "false" },
+  { messages: [null], truncated: false }, { messages: [{ role: "system", text: "Untrusted system text" }], truncated: false },
+  { messages: [{ role: "assistant", text: null }], truncated: false },
+  { messages: Array.from({ length: MAX_OUTPUT_BLOCKS + 1 }, () => ({ role: "user", text: "overflow" })), truncated: false },
+];
+
+for (const [index, history] of INVALID_NATIVE_HISTORIES.entries()) {
+  test(`malformed native history ${index} fails visibly without rendering unvalidated content`, async () => {
+    const harness = await createHarness({ invoke: async ({ command }) => {
+      if (command === "list_automation_providers") return PROVIDERS;
+      if (command === "get_local_agent_history") return history;
+    } });
+    await harness.task();
+    harness.control("automation-chat").value = CONVERSATION_ID;
+    await harness.control("automation-chat").dispatch("change");
+    await nextTurn();
+    assert.equal(harness.control("automation-chat-help").dataset.error, "true");
+    assert.match(harness.control("automation-chat-help").textContent, /Could not load conversation history/);
+    assert.doesNotMatch(harness.control("automation-output").textContent, /Untrusted system text|overflow/);
+    assert.equal(harness.control("automation-start").disabled, false);
+  });
+}
+
+const INVALID_SAVED_TRANSCRIPTS = [
+  "{", "null", JSON.stringify({ version: 2, blocks: [], trimmed: false }),
+  JSON.stringify({ version: 1, blocks: null, trimmed: false }),
+  JSON.stringify({ version: 1, blocks: [{ id: 0, format: "task", text: "invalid" }], trimmed: false }),
+  JSON.stringify({ version: 1, blocks: [{ id: 1, format: "unknown", text: "invalid" }], trimmed: false }),
+  JSON.stringify({ version: 1, blocks: [{ id: 1, format: "event", text: "invalid", tone: "unsafe" }], trimmed: false }),
+  JSON.stringify({ version: 1, blocks: [{ id: 1, format: "markdown", text: "invalid", agent: 42 }], trimmed: false }),
+  JSON.stringify({ version: 1, blocks: [{ id: 1, format: ["markdown"], text: "invalid" }], trimmed: false }),
+  JSON.stringify({ version: 1, blocks: [{ id: 1, format: "event", text: "invalid", tone: ["danger"] }], trimmed: false }),
+  JSON.stringify({ version: 1, blocks: [{ id: Number.MAX_SAFE_INTEGER, format: "task", text: "invalid" }], trimmed: false }),
+  JSON.stringify({ version: 1, blocks: [
+    { id: 1, format: "task", text: "invalid" }, { id: 1, format: "markdown", text: "duplicate" },
+  ], trimmed: false }),
+  " ".repeat(MAX_TRANSCRIPT_STORAGE_CHARACTERS + 1),
+];
+
+for (const [index, saved] of INVALID_SAVED_TRANSCRIPTS.entries()) {
+  test(`malformed saved transcript ${index} falls back to native history`, async () => {
+    const storage = createStorage();
+    storage.setItem(contextStorageKey(TARGET), JSON.stringify(CONVERSATION_ID));
+    storage.setItem(transcriptStorageKey(TARGET, "claude", CONVERSATION_ID), saved);
+    const harness = await createHarness({ storage, invoke: async ({ command }) => {
+      if (command === "list_automation_providers") return PROVIDERS;
+      if (command === "get_local_agent_history") return { messages: [{ role: "assistant", text: "Recovered native history" }], truncated: false };
+    } });
+    assert.equal(harness.calls.filter(call => call.command === "get_local_agent_history").length, 1);
+    assert.match(harness.control("automation-output").textContent, /Recovered native history/);
+    assert.doesNotMatch(harness.control("automation-output").textContent, /invalid|duplicate/);
+  });
+}
+
+test("transcript quota failures stay visible while in-memory chat history remains usable", async () => {
+  const storage = createStorage();
+  const harness = await createHarness({ storage: {
+    ...storage,
+    setItem(key, value) {
+      if (key.startsWith("sleekssh_automation_transcript:")) throw new Error("Transcript quota exceeded");
+      storage.setItem(key, value);
+    },
+  } });
+  await harness.task("Retain this question in memory");
+  await harness.start();
+  harness.emit("session", CONVERSATION_ID);
+  harness.emit("output", "Retain this answer in memory.\n");
+  harness.emit("completed", "Done");
+  assert.match(harness.control("automation-chat-help").textContent, /Could not save chat history.*Transcript quota exceeded.*Keep this window open/);
+  assert.equal(harness.control("automation-chat-help").dataset.error, "true");
+  await harness.control("automation-new-chat").dispatch("click");
+  harness.control("automation-chat").value = CONVERSATION_ID;
+  await harness.control("automation-chat").dispatch("change");
+  assert.match(harness.control("automation-output").textContent, /Retain this question in memory/);
+  assert.match(harness.control("automation-output").textContent, /Retain this answer in memory/);
+});
+
+test("bounded transcripts retain their newest output and one trim notice after reload", async () => {
+  const storage = createStorage();
+  const harness = await createHarness({ storage });
+  await harness.task();
+  await harness.start();
+  harness.emit("session", CONVERSATION_ID);
+  harness.emit("output", "x".repeat(MAX_OUTPUT_CHARACTERS));
+  harness.emit("output", "Newest saved output.");
+  harness.emit("completed", "Done");
+  const transcript = harness.control("automation-output").textContent;
+  harness.panel.dispose();
+  const reopened = await createHarness({ storage });
+  const restored = reopened.control("automation-output").textContent;
+  assert.equal(restored, transcript);
+  assert(restored.length <= MAX_OUTPUT_CHARACTERS);
+  assert.equal(restored.match(/\[Earlier output trimmed\]/g)?.length, 1);
+  assert.match(restored, /Newest saved output/);
+});
+
+test("restored transcript text remains escaped and Markdown links remain sanitized", async () => {
+  const storage = createStorage();
+  storage.setItem(contextStorageKey(TARGET), JSON.stringify(CONVERSATION_ID));
+  storage.setItem(transcriptStorageKey(TARGET, "claude", CONVERSATION_ID), JSON.stringify({ version: 1, trimmed: false, blocks: [
+    { id: 1, format: "task", text: '<img src=x onerror="alert(1)"> **literal task**' },
+    { id: 2, format: "markdown", text: '<script>alert(1)</script> [unsafe](javascript:alert(1)) **Safe answer**' },
+    { id: 3, format: "command", command: '<img src=x onerror="alert(1)">', text: "Exit status: 0\n" },
+    { id: 4, format: "event", text: '<script>alert(1)</script>', command: '<img src=x>', tone: "ok" },
+  ] }));
+  const harness = await createHarness({ storage });
+  const output = harness.control("automation-output");
+  assert.equal(output.querySelector("img"), null);
+  assert.equal(output.querySelector("script"), null);
+  assert.equal(output.querySelector('a[href^="javascript:"]'), null);
+  assert.match(output.textContent, /\*\*literal task\*\*/);
+  assert.equal(output.querySelector("strong")?.textContent, "Safe answer");
+  assert.equal(harness.calls.some(call => call.command === "get_local_agent_history"), false);
+});
+
+test("the selected provider restores its conversation and transcript after reload", async () => {
+  const storage = createStorage();
+  const harness = await createHarness({ storage });
+  harness.control("automation-provider").value = "codex";
+  await harness.control("automation-provider").dispatch("change");
+  await harness.task("Codex saved question");
+  await harness.start();
+  harness.emit("session", OTHER_CONVERSATION_ID);
+  harness.emit("output", "Codex saved answer.\n");
+  harness.emit("completed", "Done");
+  harness.panel.dispose();
+  const reopened = await createHarness({ storage });
+  assert.equal(reopened.control("automation-provider").value, "codex");
+  assert.equal(reopened.control("automation-conversation").value, OTHER_CONVERSATION_ID);
+  assert.match(reopened.control("automation-output").textContent, /Codex saved question/);
+  assert.match(reopened.control("automation-output").textContent, /Codex saved answer/);
+  await reopened.task("Codex follow-up");
+  await reopened.start();
+  assert.equal(reopened.calls.find(call => call.command === "start_ssh_automation")?.arguments_?.provider, "codex");
+  assert.equal(reopened.calls.find(call => call.command === "start_ssh_automation")?.arguments_?.resumeSessionId, OTHER_CONVERSATION_ID);
+});
+
+test("a later turn cannot reactivate historical commands or attach orphan output to them", async () => {
+  const harness = await createHarness();
+  await harness.task("First turn command");
+  await harness.start();
+  harness.emit("session", CONVERSATION_ID);
+  harness.emit("command", "Running", { command: "first-command" });
+  harness.emit("completed", "First turn finished");
+  const output = harness.control("automation-output");
+  assert.equal(output.children.find(block => block.className === "automation-output-command")?.dataset.state, "idle");
+  await harness.task("Second turn command");
+  await harness.start();
+  assert.equal(output.children.find(block => block.className === "automation-output-command")?.dataset.state, "idle");
+  harness.emit("command_output", "Unassociated second-turn output\n");
+  const oldCommand = output.children.find(block => block.className === "automation-output-command")!;
+  assert.equal(oldCommand.dataset.state, "idle");
+  assert.doesNotMatch(oldCommand.textContent, /Unassociated second-turn output/);
+  assert.match(output.children.find(block => block.className === "automation-output-log")?.textContent ?? "", /Unassociated second-turn output/);
+  harness.emit("command", "Running", { command: "second-command" });
+  const commands = output.children.filter(block => block.className === "automation-output-command");
+  assert.equal(commands[0].dataset.state, "idle");
+  assert.equal(commands[1].dataset.state, "running");
+});
+
+test("New chat clears a failed run draft across reload even without a returned conversation ID", async () => {
+  const storage = createStorage();
+  const harness = await createHarness({ storage });
+  await harness.task("Failed new-chat question");
+  await harness.start();
+  harness.emit("output", "Partial failed new-chat answer.\n");
+  harness.emit("failed", "Agent exited before returning an ID");
+  await harness.control("automation-new-chat").dispatch("click");
+  assert.doesNotMatch(harness.control("automation-output").textContent, /Failed new-chat question|Partial failed new-chat answer/);
+  harness.panel.dispose();
+  const reopened = await createHarness({ storage });
+  assert.equal(reopened.control("automation-conversation").value, "");
+  assert.doesNotMatch(reopened.control("automation-output").textContent, /Failed new-chat question|Partial failed new-chat answer/);
+});
+
+test("dropdown selection storage errors remain visible beside the selected conversation", async () => {
+  const storage = createStorage();
+  const harness = await createHarness({ storage: {
+    ...storage,
+    setItem(key, value) {
+      if (key.startsWith("sleekssh_automation_conversation:")) throw new Error("Selection quota exceeded");
+      storage.setItem(key, value);
+    },
+  } });
+  harness.control("automation-chat").value = CONVERSATION_ID;
+  await harness.control("automation-chat").dispatch("change");
+  await nextTurn();
+  assert.equal(harness.control("automation-conversation").value, CONVERSATION_ID);
+  assert.match(harness.control("automation-conversation-help").textContent, /Could not save this chat context.*Selection quota exceeded.*Copy the conversation ID/);
+  assert.equal(harness.control("automation-conversation-help").dataset.error, "true");
 });
 
 test("conversation context and draft edits are isolated by provider and remote identity", async () => {
@@ -816,7 +1439,7 @@ test("stale and cross-server conversation events cannot replace the pinned chat"
   await harness.start();
   harness.emit("session", CONVERSATION_ID, { run_id: "old-run" });
   harness.emit("session", CONVERSATION_ID, { session_id: "other-server" });
-  assert.equal(storage.values.size, 0);
+  assert.equal(storage.values.has(contextStorageKey(TARGET)), false);
   assert.equal(harness.control("automation-conversation").value, "");
   harness.selectTarget({ sessionId: "other-server", label: "Other server" });
   harness.emit("session", CONVERSATION_ID);
@@ -840,7 +1463,7 @@ test("invalid conversation IDs block submission and invalid native IDs are not s
   await harness.control("automation-new-chat").dispatch("click");
   await harness.start();
   harness.emit("session", "invalid");
-  assert.equal(storage.values.size, 0);
+  assert.equal(storage.values.has(contextStorageKey(TARGET)), false);
   assert.match(harness.control("automation-status").textContent, /invalid conversation ID/);
 });
 
@@ -948,6 +1571,7 @@ test("chat-list errors remain actionable without blocking New chat or manual IDs
   let fail = true;
   const harness = await createHarness({ invoke: async ({ command }) => {
     if (command === "list_automation_providers") return PROVIDERS;
+    if (command === "get_local_agent_history") return { messages: [], truncated: false };
     if (command === "list_local_agent_sessions") {
       if (fail) throw new Error("Local history unavailable");
       return { sessions: [], warnings: [], truncated: false };
@@ -1204,8 +1828,9 @@ test("denying sudo consent neither approves commands nor stores a grant for late
   assert.doesNotMatch(harness.control("automation-sudo-status").textContent, /allowed/);
   harness.emit("sudo_approval", "Repeated", SUDO_REQUEST);
   assert.equal(harness.control("automation-sudo-approval").hidden, true);
-  assert.equal(storage.values.size, 0);
+  assert([...storage.values.keys()].every(key => key.startsWith("sleekssh_automation_transcript:")));
   harness.emit("completed", "Done");
+  await harness.task("Inspect sudo consent for the next task");
   await harness.start();
   harness.emit("sudo_approval", SUDO_REQUEST_MESSAGE, SUDO_REQUEST);
   assert.equal(harness.control("automation-sudo-approval").hidden, false);
@@ -1268,6 +1893,7 @@ test("credential errors revoke the allowed banner and missing credentials are ac
   assert.match(harness.control("automation-sudo-status").textContent, /Password rejected/);
   assert.doesNotMatch(harness.control("automation-sudo-status").textContent, /allowed/);
   harness.emit("failed", "Sudo failed");
+  await harness.task("Retry with updated sudo credentials");
   await harness.start();
   harness.emit("sudo_error", "No saved sudo password. Edit this server's saved credentials, then start a new run.");
   assert.equal(harness.control("automation-sudo-approval").hidden, true);
@@ -1345,6 +1971,7 @@ for (const kind of ["completed", "failed", "cancelled"]) {
     harness.emit(kind, "Finished");
     assert.equal(harness.control("automation-sudo-status").hidden, true);
     assert.equal(harness.control("automation-sudo-status").textContent, "");
+    await harness.task("Inspect sudo consent for the next task");
     await harness.start();
     harness.emit("sudo_approval", SUDO_REQUEST_MESSAGE, SUDO_REQUEST);
     harness.emit("sudo_status", "Stale success", { run_id: "run-1", request_id: SUDO_REQUEST.request_id });
@@ -1370,6 +1997,82 @@ test("sudo details remain literal text and consent controls are present in the r
   assert.equal(page.getElementById("automation-sudo-allow")?.getAttribute("type"), "button");
   assert.equal(page.getElementById("automation-sudo-deny")?.textContent, "Deny");
   assert.equal(page.getElementById("automation-sudo-approval")?.querySelector('input[type="password"]'), null);
+});
+
+test("command history counts executed commands once with their pinned target and execution identity", async () => {
+  const executed: Array<{ target: SshTarget; command: string }> = [];
+  const harness = await createHarness({ onCommandExecuted: (target, command) => { executed.push({ target, command }); } });
+  await harness.task();
+  await harness.start();
+  harness.emit("command", "Running", { command: "first-command", request_id: "execution-1" });
+  harness.emit("command", "Running", { command: "second-command", request_id: "execution-2" });
+  assert.equal(executed.length, 0);
+  harness.selectTarget({ sessionId: "other-server", label: "Other server" });
+  harness.emit("command_output", "Exit status: 1\n", { command: "first-command", request_id: "execution-1" });
+  harness.emit("command_output", "Exit status: 1\n", { command: "first-command", request_id: "execution-1" });
+  harness.emit("command_output", "Exit status: 0\n", { command: "second-command", request_id: "execution-2" });
+  assert.deepEqual(executed, [{ target: TARGET, command: "first-command" }, { target: TARGET, command: "second-command" }]);
+});
+
+test("denied or cancelled command proposals never enter command history", async () => {
+  const commands: string[] = [];
+  const harness = await createHarness({ onCommandExecuted: (_target, command) => { commands.push(command); } });
+  await harness.task();
+  await harness.start();
+  harness.emit("approval", "Approve", { request_id: "denied-command", command: "dangerous-command" });
+  harness.emit("command", "Running", { command: "sudo command-needing-consent" });
+  harness.emit("sudo_error", "Saved sudo password denied for this run.");
+  harness.emit("failed", "Command was not executed");
+  harness.emit("command_output", "Exit status: 0\n", { command: "late-command", request_id: "old-execution" });
+  assert.deepEqual(commands, []);
+});
+
+test("started agent commands enter history even when stopped before returning a result", async () => {
+  const commands: string[] = [];
+  const harness = await createHarness({ onCommandExecuted: (_target, command) => { commands.push(command); } });
+  await harness.task();
+  await harness.start();
+  harness.emit("command", "Running", { command: "long-running-command", request_id: "execution-started" });
+  assert.deepEqual(commands, []);
+  harness.emit("command_executed", "Started", { command: "long-running-command", request_id: "execution-started" });
+  harness.emit("command_executed", "Started", { command: "long-running-command", request_id: "execution-started" });
+  assert.deepEqual(commands, ["long-running-command"]);
+  harness.emit("cancelled", "Stopped");
+  assert.deepEqual(commands, ["long-running-command"]);
+});
+
+test("a completed result does not count an already recorded start again", async () => {
+  const commands: string[] = [];
+  const harness = await createHarness({ onCommandExecuted: (_target, command) => { commands.push(command); } });
+  await harness.task();
+  await harness.start();
+  for (const payload of [{ command: "uptime" }, { request_id: "x" }, { command: null, request_id: "x" }]) {
+    harness.emit("command_executed", "Malformed", payload);
+  }
+  assert.deepEqual(commands, []);
+  const execution = { command: "uptime", request_id: "execution-completed" };
+  harness.emit("command", "Running", execution);
+  harness.emit("command_executed", "Started", execution);
+  harness.emit("command_output", "Exit status: 0\n", execution);
+  assert.deepEqual(commands, ["uptime"]);
+});
+
+test("legacy command results record once and history callback errors remain visible", async () => {
+  const commands: string[] = [];
+  const harness = await createHarness({ onCommandExecuted: (_target, command) => {
+    commands.push(command);
+    throw new Error("History storage full");
+  } });
+  await harness.task();
+  await harness.start();
+  harness.emit("command", "Running", { command: "uptime" });
+  harness.emit("command_output", "output without completed execution");
+  assert.equal(commands.length, 0);
+  harness.emit("command_output", "Exit status: 0\n");
+  harness.emit("command_output", "Exit status: 0\n");
+  assert.deepEqual(commands, ["uptime"]);
+  assert.match(harness.control("automation-status").textContent, /Could not save command history.*History storage full/);
+  assert.equal(harness.control("automation-stop").disabled, false);
 });
 
 for (const missingControl of ["automation-sudo-approval", "automation-sudo-allow", "automation-sudo-deny", "automation-sudo-status", "automation-sudo-command", "automation-sudo-target", "automation-sudo-message"]) {

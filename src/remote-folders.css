@@ -1,0 +1,84 @@
+:root {
+  --remote-folder-gap: 12px;
+  --remote-folder-padding: 16px;
+  --remote-folder-action-size: 44px;
+}
+
+.remote-folders-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--remote-folder-gap);
+  min-inline-size: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: var(--remote-folder-padding);
+}
+
+.remote-folders-settings legend {
+  padding-inline: var(--remote-folder-gap);
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+#prof-remote-folders {
+  display: grid;
+  gap: var(--remote-folder-gap);
+}
+
+.remote-folder-row {
+  display: grid;
+  gap: var(--remote-folder-gap);
+  padding-block-start: var(--remote-folder-gap);
+  border-block-start: 1px solid var(--line);
+}
+
+.remote-folder-row input,
+#prof-start-path,
+#remote-folder-path {
+  min-inline-size: 0;
+  inline-size: 100%;
+  font-family: var(--font-mono);
+}
+
+.remote-folder-row button,
+#prof-add-remote-folder,
+.remote-folder-save-form button {
+  min-block-size: var(--remote-folder-action-size);
+}
+
+.remote-folder-dialog:not([open]) { display: none; }
+
+.remote-folder-dialog {
+  margin: auto;
+  color: var(--text-1);
+  max-inline-size: calc(100% - var(--remote-folder-padding) * 2);
+}
+
+.remote-folder-dialog::backdrop { background: rgba(4, 5, 8, 0.62); }
+
+.remote-folder-save-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--remote-folder-gap);
+  padding: var(--remote-folder-padding);
+  overflow-y: auto;
+}
+
+.remote-folder-save-form .modal-footer {
+  position: static;
+  margin: 0;
+  padding: var(--remote-folder-gap) 0 0;
+}
+
+.palette-context {
+  padding: var(--remote-folder-gap) var(--remote-folder-padding);
+  border-block-end: 1px solid var(--line);
+  color: var(--text-2);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+@media (min-width: 768px) {
+  .remote-folder-row { grid-template-columns: 1fr 2fr; align-items: end; }
+  .remote-folder-row button { grid-column: 1 / -1; justify-self: end; }
+}

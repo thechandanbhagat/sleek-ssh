@@ -58,6 +58,7 @@ pub(crate) fn execute(
     disconnected: &AtomicBool,
     cancelled: &AtomicBool,
     command: &str,
+    on_started: impl FnOnce() -> Result<(), String>,
 ) -> Result<CommandOutput, String> {
     validate_command(command)?;
     let control = RunControl {
@@ -68,7 +69,7 @@ pub(crate) fn execute(
     let mut channel = retry_ssh(&control, "open automation channel", || {
         with_session(session, &control, Session::channel_session)
     })?;
-    let result = execute_channel(session, &mut channel, &control, command);
+    let result = execute_channel(session, &mut channel, &control, command, on_started);
     let close_result = close_channel(session, &mut channel);
 
     // ssh2 frees channels without its internal session lock, so serialize the final drop too.
@@ -152,10 +153,13 @@ fn execute_channel(
     channel: &mut Channel,
     control: &RunControl<'_>,
     command: &str,
+    on_started: impl FnOnce() -> Result<(), String>,
 ) -> Result<CommandOutput, String> {
-    retry_ssh(control, "start remote command", || {
-        with_session(session, control, |_| channel.exec(command))
-    })?;
+    start_command(
+        control,
+        || with_session(session, control, |_| channel.exec(command)),
+        on_started,
+    )?;
     retry_ssh(control, "close remote command input", || {
         with_session(session, control, |_| channel.send_eof())
     })?;
@@ -184,6 +188,15 @@ fn execute_channel(
         exit_code,
         truncated,
     })
+}
+
+fn start_command(
+    control: &RunControl<'_>,
+    execute: impl FnMut() -> Result<Result<(), ssh2::Error>, String>,
+    on_started: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    retry_ssh(control, "start remote command", execute)?;
+    on_started()
 }
 
 #[derive(Clone, Copy)]
@@ -261,7 +274,10 @@ mod tests {
         let session = session();
         let flag = AtomicBool::new(false);
         for command in ["", " \r\n\t", "echo\0invalid"] {
-            assert!(execute(&session, &flag, &flag, command).is_err());
+            assert!(execute(&session, &flag, &flag, command, || panic!(
+                "invalid command must not start"
+            ))
+            .is_err());
         }
     }
 
@@ -272,11 +288,15 @@ mod tests {
         assert!(validate_command(&"é".repeat(MAX_COMMAND_BYTES / 2)).is_ok());
         assert!(validate_command(&"é".repeat(MAX_COMMAND_BYTES / 2 + 1)).is_err());
         let flag = AtomicBool::new(false);
-        assert!(
-            execute(&session(), &flag, &flag, &"x".repeat(MAX_COMMAND_BYTES + 1))
-                .unwrap_err()
-                .contains("limit")
-        );
+        assert!(execute(
+            &session(),
+            &flag,
+            &flag,
+            &"x".repeat(MAX_COMMAND_BYTES + 1),
+            || panic!("oversized command must not start")
+        )
+        .unwrap_err()
+        .contains("limit"));
     }
 
     #[test]
@@ -284,12 +304,83 @@ mod tests {
         let session = session();
         let clear = AtomicBool::new(false);
         let set = AtomicBool::new(true);
-        assert!(execute(&session, &set, &clear, "pwd")
-            .unwrap_err()
-            .contains("disconnected"));
-        assert!(execute(&session, &clear, &set, "pwd")
-            .unwrap_err()
-            .contains("cancelled"));
+        assert!(execute(&session, &set, &clear, "pwd", || panic!(
+            "disconnected command must not start"
+        ))
+        .unwrap_err()
+        .contains("disconnected"));
+        assert!(execute(&session, &clear, &set, "pwd", || panic!(
+            "cancelled command must not start"
+        ))
+        .unwrap_err()
+        .contains("cancelled"));
+    }
+
+    #[test]
+    fn command_start_retries_then_notifies_once_before_later_cancellation() {
+        let disconnected = AtomicBool::new(false);
+        let cancelled = AtomicBool::new(false);
+        let control = RunControl {
+            disconnected: &disconnected,
+            cancelled: &cancelled,
+            deadline: Instant::now() + COMMAND_TIMEOUT,
+        };
+        let mut attempts = 0;
+        let mut starts = 0;
+        start_command(
+            &control,
+            || {
+                attempts += 1;
+                Ok(if attempts == 1 {
+                    Err(ssh2::Error::from_errno(ErrorCode::Session(
+                        SSH_ERROR_EAGAIN,
+                    )))
+                } else {
+                    Ok(())
+                })
+            },
+            || {
+                starts += 1;
+                cancelled.store(true, Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(starts, 1);
+        assert!(control.check().unwrap_err().contains("cancelled"));
+    }
+
+    #[test]
+    fn failed_or_cancelled_command_start_does_not_notify_and_callback_errors_propagate() {
+        let flag = AtomicBool::new(false);
+        let control = RunControl {
+            disconnected: &flag,
+            cancelled: &flag,
+            deadline: Instant::now() + COMMAND_TIMEOUT,
+        };
+        let error = start_command(
+            &control,
+            || Ok(Err(ssh2::Error::from_errno(ErrorCode::Session(-1)))),
+            || panic!("failed execution must not report a start"),
+        )
+        .unwrap_err();
+        assert!(error.contains("start remote command"));
+        let error = start_command(
+            &control,
+            || Ok(Ok(())),
+            || Err("Cannot deliver started event".to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(error, "Cannot deliver started event");
+        flag.store(true, Ordering::Relaxed);
+        assert!(start_command(
+            &control,
+            || panic!("cancelled execution must not access SSH"),
+            || panic!("cancelled execution must not report a start"),
+        )
+        .unwrap_err()
+        .contains("disconnected"));
     }
 
     #[test]

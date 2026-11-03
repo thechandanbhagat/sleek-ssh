@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { createContext, runInContext } from "node:vm";
+import { SSH_COMMAND_HISTORY_SCRIPT } from "../src/shell-integration.ts";
 
 const APPLICATION_SOURCE = readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
 const DEFAULT_COLUMNS = 80;
@@ -9,6 +13,10 @@ const DEFAULT_ROWS = 24;
 const DEFAULT_SSH_PORT = 22;
 const REMOTE_HOME = "/home/tester";
 const SAVED_DIRECTORY = "/srv/project with spaces";
+const PROCESS_TIMEOUT_MS = 10_000;
+const BASH_PATH = process.platform === "win32"
+  ? ["C:/Program Files/Git/bin/bash.exe", "C:/Program Files/Git/usr/bin/bash.exe"].find(existsSync)
+  : "/bin/bash";
 
 type Invocation = { command: string; arguments: Record<string, unknown> };
 type InvokeHandler = (invocation: Invocation) => Promise<unknown>;
@@ -88,6 +96,7 @@ function createHarness(handleInvocation?: InvokeHandler) {
   let transportNumber = 0;
   const context = createContext({
     window: {
+      SleekSshHistory: { SSH_COMMAND_HISTORY_SCRIPT },
       __TAURI__: {
         core: {
           async invoke(command: string, arguments_: Record<string, unknown>) {
@@ -191,6 +200,29 @@ function createHarness(handleInvocation?: InvokeHandler) {
   };
 }
 
+function attachPromptController(harness: ReturnType<typeof createHarness>) {
+  let promptToken: object | null = Object.freeze({});
+  let beforeWrite: (() => void) | null = null;
+  const submissions: Array<{ command: string; run: boolean; token: object }> = [];
+  const controller = {
+    getPromptToken: () => promptToken,
+    async sendSnippet(command: string, run: boolean, token: object, write: (text: string) => Promise<void>) {
+      assert.ok(promptToken);
+      assert.equal(token, promptToken);
+      promptToken = null;
+      submissions.push({ command, run, token });
+      beforeWrite?.();
+      await write(command + (run ? "\r" : ""));
+    },
+  };
+  Object.assign(harness.session, { commandHistory: controller });
+  return {
+    controller, submissions,
+    blockPrompt() { promptToken = null; },
+    beforeWrite(callback: () => void) { beforeWrite = callback; },
+  };
+}
+
 test("reconnecting preserves the tab, terminal, and saved directories with a fresh transport", async () => {
   const harness = createHarness();
   const previousTerminal = harness.session.term;
@@ -231,6 +263,65 @@ test("fresh connections provide a single quiet setup payload with a safely quote
   assert.equal(/[\x00\r\n]/.test(command), false);
   assert.equal(harness.calls.length, 0);
   assert.ok(harness.run<string>("createTerminalSetupCommand(null)").endsWith("; fi"));
+});
+
+test("SSH reconnect sends the complete command history integration in its native setup payload", async () => {
+  const harness = createHarness();
+  await harness.run<Promise<void>>("reconnectSshSession(session)");
+
+  const connection = harness.calls.find(call => call.command === "connect_ssh");
+  const setup = connection?.arguments.terminalSetup;
+  assert.ok(typeof setup === "string");
+  assert.ok(setup.includes(SSH_COMMAND_HISTORY_SCRIPT.replaceAll("'", "'\\''")));
+  assert.ok(setup.includes("__SLEEKSSH_CWD_HOOK_INSTALLED"));
+  assert.equal(harness.session.isClosed, false);
+});
+
+test("the full SSH setup installs CWD and history hooks and restores a Unicode path literally", { skip: !BASH_PATH }, () => {
+  assert.ok(BASH_PATH);
+  const temporaryRoot = resolve(tmpdir());
+  const temporaryDirectory = mkdtempSync(join(temporaryRoot, "sleekssh-setup-"));
+  try {
+    const directory = join(temporaryDirectory, "owner's café 日本語");
+    mkdirSync(directory);
+    const shellPath = process.platform === "win32"
+      ? directory.replaceAll("\\", "/").replace(/^([a-z]):/i, (_, drive: string) => `/${drive.toLowerCase()}`)
+      : directory;
+    const harness = createHarness();
+    const setup = harness.run<string>(`createTerminalSetupCommand(${JSON.stringify(shellPath)})`);
+    const command = "printf '%s\\n' 'café & test'";
+    const quotedCommand = harness.run<string>(`quoteRemoteShellArgument(${JSON.stringify(command)})`);
+    const script = [
+      'set -e',
+      setup,
+      'test "${__SLEEKSSH_CWD_HOOK_INSTALLED-}" = 1',
+      'test "${__SLEEKSSH_HISTORY_HOOK_INSTALLED-}" = 1',
+      'test "$(type -t __sleekssh_report_cwd)" = function',
+      'test "$(type -t __sleekssh_history_prompt)" = function',
+      `__sleekssh_history_command ${quotedCommand}`,
+      '__sleekssh_history_prompt',
+      'printf "\\nrestored=%s\\nprompt=%s\\n" "$PWD" "$PS1"'
+    ].join("\n");
+    const result = spawnSync(BASH_PATH, ["--noprofile", "--norc"], {
+      input: `${script}\n`,
+      encoding: "utf8",
+      timeout: PROCESS_TIMEOUT_MS,
+      env: { ...process.env, PS1: "test> ", HISTFILE: "/dev/null" }
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /\x1b\]7;file:\/\/localhost[^\x07]+\x07/);
+    const reportedUri = /\x1b\]7;(file:\/\/localhost[^\x07]+)\x07/.exec(result.stdout)?.[1];
+    assert.ok(reportedUri);
+    assert.equal(decodeURIComponent(new URL(reportedUri).pathname), shellPath);
+    assert.ok(result.stdout.includes(`\x1b]6973;command;${Buffer.from(command).toString("base64")}\x07`));
+    assert.ok(result.stdout.includes(`restored=${shellPath}\n`));
+    assert.ok(result.stdout.includes("6973;prompt-start"));
+    assert.ok(result.stdout.includes("6973;prompt-end"));
+  } finally {
+    assert.equal(dirname(resolve(temporaryDirectory)), temporaryRoot);
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
 });
 
 test("the session toolbar displays the actual path and enables copy only for selected text", () => {
@@ -490,13 +581,106 @@ for (const control of ["\0", "\n", "\r", "\t", "\x1b", "\x7f"]) {
 
 test("directory synchronization uses the current transport and waits for an OSC report before tracking the path", async () => {
   const harness = createHarness();
+  const prompt = attachPromptController(harness);
+  const promptToken = prompt.controller.getPromptToken();
   harness.session.isClosed = false;
   await harness.run<Promise<void>>("synchronizeTerminalDirectory(session, '/srv/next directory')");
 
   const write = harness.calls.find((call) => call.command === "write_ssh");
   assert.equal(write?.arguments.sessionId, harness.session.connectionId);
-  assert.match(atob(write?.arguments.dataBase64 as string), /cd .*'\/srv\/next directory'/);
+  assert.equal(atob(write?.arguments.dataBase64 as string), "cd '/srv/next directory'\r");
+  assert.deepEqual(prompt.submissions, [{ command: "cd '/srv/next directory'", run: true, token: promptToken }]);
   assert.equal(harness.session.terminalPath, SAVED_DIRECTORY);
+});
+
+test("directory synchronization leaves a nonempty or busy prompt untouched", async () => {
+  const harness = createHarness();
+  const prompt = attachPromptController(harness);
+  harness.session.isClosed = false;
+  prompt.blockPrompt();
+  await harness.run<Promise<void>>("synchronizeTerminalDirectory(session, '/srv/next directory')");
+
+  assert.deepEqual(harness.calls, []);
+  assert.deepEqual(prompt.submissions, []);
+  assert.equal(harness.session.terminalPath, SAVED_DIRECTORY);
+});
+
+test("directory synchronization consumes the reviewed prompt before awaiting native writes and blocks duplicates", async () => {
+  const completion = deferred();
+  const harness = createHarness(async ({ command }) => { if (command === "write_ssh") await completion.promise; });
+  const prompt = attachPromptController(harness);
+  harness.session.isClosed = false;
+  const previewToken = prompt.controller.getPromptToken();
+  const first = harness.run<Promise<void>>("synchronizeTerminalDirectory(session, '/srv/first')");
+
+  assert.ok(previewToken);
+  assert.equal(prompt.controller.getPromptToken(), null);
+  assert.equal(harness.calls.length, 1);
+  assert.deepEqual(prompt.submissions, [{ command: "cd '/srv/first'", run: true, token: previewToken }]);
+  await harness.run<Promise<void>>("synchronizeTerminalDirectory(session, '/srv/second')");
+  assert.equal(harness.calls.length, 1);
+  assert.equal(prompt.submissions.length, 1);
+  completion.resolve();
+  await first;
+});
+
+test("directory synchronization cannot execute a command left in the prompt by snippet Insert", async () => {
+  const harness = createHarness();
+  const prompt = attachPromptController(harness);
+  harness.session.isClosed = false;
+  const token = prompt.controller.getPromptToken();
+  assert.ok(token);
+  const inserted: string[] = [];
+  await prompt.controller.sendSnippet("echo prepared", false, token, async text => { inserted.push(text); });
+  await harness.run<Promise<void>>("synchronizeTerminalDirectory(session, '/srv/next')");
+
+  assert.deepEqual(inserted, ["echo prepared"]);
+  assert.deepEqual(harness.calls, []);
+  assert.equal(prompt.submissions.length, 1);
+});
+
+test("directory synchronization propagates native write rejection", async () => {
+  const failure = new Error("SSH write rejected");
+  const harness = createHarness(async ({ command }) => { if (command === "write_ssh") throw failure; });
+  const prompt = attachPromptController(harness);
+  harness.session.isClosed = false;
+
+  await assert.rejects(harness.run<Promise<void>>("synchronizeTerminalDirectory(session, '/srv/next')"), error => error === failure);
+  assert.equal(harness.calls.length, 1);
+  assert.equal(prompt.controller.getPromptToken(), null);
+  assert.equal(harness.session.terminalPath, SAVED_DIRECTORY);
+});
+
+test("directory synchronization refuses unavailable sessions and missing prompt controllers", async () => {
+  for (const change of [
+    "session.isClosed = true", "session.isClosing = true", "session.isConnecting = true",
+    "session.connectionId = null", "session.connectionId = ''", "session.term = null", "session.commandHistory = null",
+  ]) {
+    const harness = createHarness();
+    const prompt = attachPromptController(harness);
+    harness.session.isClosed = false;
+    harness.run(change);
+    await harness.run<Promise<void>>("synchronizeTerminalDirectory(session, '/srv/next')");
+
+    assert.deepEqual(harness.calls, [], change);
+    assert.deepEqual(prompt.submissions, [], change);
+  }
+});
+
+test("directory synchronization rechecks the pinned connection immediately before writing", async () => {
+  for (const change of [
+    "session.isClosed = true", "session.isClosing = true", "session.isConnecting = true",
+    "session.connectionId = null", "session.connectionId = 'replacement-transport'",
+  ]) {
+    const harness = createHarness();
+    const prompt = attachPromptController(harness);
+    harness.session.isClosed = false;
+    prompt.beforeWrite(() => { harness.run(change); });
+
+    await assert.rejects(harness.run<Promise<void>>("synchronizeTerminalDirectory(session, '/srv/next')"), /terminal connection changed/);
+    assert.deepEqual(harness.calls, [], change);
+    assert.equal(prompt.submissions.length, 1);
+  }
 });
 
 test("file browser listing uses the current transport and resolves an empty path to home", async () => {

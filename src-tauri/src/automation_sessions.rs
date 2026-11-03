@@ -1,7 +1,7 @@
 use crate::automation_provider::{validate_conversation_id, Provider};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs::{self, File, Metadata};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -22,6 +22,72 @@ const MAX_PROJECT_CHARACTERS: usize = 4_096;
 const MAX_WARNINGS: usize = 8;
 const MAX_ROLLOUT_DEPTH: usize = 4;
 const UUID_BYTES: usize = 36;
+const MAX_HISTORY_MESSAGES: usize = 200;
+const MAX_HISTORY_CHARACTERS: usize = 200_000;
+const MAX_HISTORY_READ_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct SessionHistory {
+    messages: Vec<HistoryMessage>,
+    truncated: bool,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct HistoryMessage {
+    role: String,
+    text: String,
+}
+
+#[derive(Default)]
+struct HistoryBuffer {
+    messages: VecDeque<HistoryMessage>,
+    characters: usize,
+    truncated: bool,
+}
+
+impl HistoryBuffer {
+    fn push(&mut self, role: &str, text: String) {
+        let text = if role == "user" {
+            text.strip_prefix(crate::automation::REMOTE_AUTOMATION_INSTRUCTIONS)
+                .and_then(|text| text.strip_prefix("\n\nUser task:\n"))
+                .map(|task| task.strip_suffix('\n').unwrap_or(task).to_string())
+                .unwrap_or(text)
+        } else {
+            text
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        let characters = text.chars().count();
+        let text = if characters > MAX_HISTORY_CHARACTERS {
+            self.truncated = true;
+            text.chars().take(MAX_HISTORY_CHARACTERS).collect()
+        } else {
+            text
+        };
+        let characters = characters.min(MAX_HISTORY_CHARACTERS);
+        while self.messages.len() >= MAX_HISTORY_MESSAGES
+            || self.characters + characters > MAX_HISTORY_CHARACTERS
+        {
+            if let Some(message) = self.messages.pop_front() {
+                self.characters -= message.text.chars().count();
+                self.truncated = true;
+            }
+        }
+        self.characters += characters;
+        self.messages.push_back(HistoryMessage {
+            role: role.to_string(),
+            text,
+        });
+    }
+
+    fn finish(self) -> SessionHistory {
+        SessionHistory {
+            messages: self.messages.into_iter().collect(),
+            truncated: self.truncated,
+        }
+    }
+}
 
 #[derive(Debug, Default, Serialize)]
 pub(crate) struct SessionList {
@@ -118,6 +184,234 @@ pub(crate) async fn list_local_agent_sessions(provider: String) -> Result<Sessio
     tokio::task::spawn_blocking(move || list_from_root(provider, &root))
         .await
         .map_err(|error| format!("Local session discovery task failed: {error}"))
+}
+
+#[tauri::command]
+pub(crate) async fn get_local_agent_history(
+    provider: String,
+    session_id: String,
+) -> Result<SessionHistory, String> {
+    let provider = Provider::parse(&provider)?;
+    validate_conversation_id(&session_id)?;
+    let root = configured_root(provider)?;
+    tokio::task::spawn_blocking(move || history_from_root(provider, &root, &session_id))
+        .await
+        .map_err(|error| format!("Local chat history task failed: {error}"))?
+}
+
+fn history_from_root(
+    provider: Provider,
+    root: &Path,
+    session_id: &str,
+) -> Result<SessionHistory, String> {
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SessionHistory::default());
+        }
+        Err(error) => return Err(format!("Cannot inspect local chat history: {error}")),
+    };
+    if linked(&metadata) || !metadata.is_dir() {
+        return Err("The agent session directory must be a regular directory without links".into());
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("Cannot resolve local chat history: {error}"))?;
+    let mut discovery = Discovery::default();
+    let mut paths = Vec::new();
+    match provider {
+        Provider::Claude => {
+            for project in directory_paths(&root.join("projects"), &root, &mut discovery) {
+                if !checked_metadata(&project, &root, &mut discovery)
+                    .is_some_and(|metadata| metadata.is_dir())
+                {
+                    continue;
+                }
+                for path in directory_paths(&project, &root, &mut discovery) {
+                    if path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            name.eq_ignore_ascii_case(&format!("{session_id}.jsonl"))
+                        })
+                    {
+                        paths.push(path);
+                    }
+                }
+            }
+        }
+        Provider::Codex => history_codex_paths(
+            &root,
+            &root.join("sessions"),
+            session_id,
+            0,
+            &mut paths,
+            &mut discovery,
+        ),
+    }
+    let mut history = SessionHistory::default();
+    for path in paths {
+        let Some(metadata) = checked_metadata(&path, &root, &mut discovery) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            return Err("Local chat history must be a regular file".into());
+        }
+        let Some(mut file) = open_metadata_file(&path, &mut discovery) else {
+            continue;
+        };
+        if provider == Provider::Codex {
+            let header = read_header(&mut file, metadata.len(), &mut discovery)
+                .ok_or("Cannot read the selected chat metadata")?;
+            let record = serde_json::from_slice::<MetadataRecord>(&header)
+                .map_err(|_| "The selected Codex chat metadata is malformed")?;
+            let payload = record
+                .payload
+                .ok_or("The selected Codex chat metadata is missing")?;
+            if record.kind.as_deref() != Some("session_meta")
+                || !payload
+                    .id
+                    .as_ref()
+                    .or(payload.session_id.as_ref())
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.eq_ignore_ascii_case(session_id))
+            {
+                return Err("The selected Codex chat ID does not match its session file".into());
+            }
+            if codex_subagent(&payload) || payload.archived == Some(true) {
+                return Err("The selected chat is archived or belongs to a subagent".into());
+            }
+        }
+        let count = metadata.len().min(MAX_HISTORY_READ_BYTES as u64) as usize;
+        let offset = metadata.len().saturating_sub(count as u64);
+        let bytes = read_window(&mut file, offset, count, &mut discovery)
+            .ok_or("Cannot read the selected chat history")?;
+        history = parse_history(provider, session_id, &bytes, offset == 0)?;
+        history.truncated |= offset != 0;
+        break;
+    }
+    if let Some(warning) = discovery.result.warnings.first() {
+        return Err(warning.clone());
+    }
+    history.truncated |= discovery.result.truncated;
+    Ok(history)
+}
+
+fn history_codex_paths(
+    root: &Path,
+    directory: &Path,
+    session_id: &str,
+    depth: usize,
+    paths: &mut Vec<PathBuf>,
+    discovery: &mut Discovery,
+) {
+    for path in directory_paths(directory, root, discovery) {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if matches!(name, "archived_sessions" | "subagents" | "archive") {
+            continue;
+        }
+        let Some(metadata) = checked_metadata(&path, root, discovery) else {
+            continue;
+        };
+        if metadata.is_dir() {
+            if depth < MAX_ROLLOUT_DEPTH {
+                history_codex_paths(root, &path, session_id, depth + 1, paths, discovery);
+            } else {
+                discovery.limit();
+            }
+        } else if name.starts_with("rollout-")
+            && name.strip_suffix(".jsonl").is_some_and(|stem| {
+                stem.get(stem.len().saturating_sub(UUID_BYTES)..)
+                    .is_some_and(|id| id.eq_ignore_ascii_case(session_id))
+            })
+        {
+            paths.push(path);
+        }
+    }
+}
+
+fn history_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter_map(|block| match block.get("type").and_then(Value::as_str) {
+                Some("text" | "input_text" | "output_text") => {
+                    block.get("text").and_then(Value::as_str)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn parse_history(
+    provider: Provider,
+    session_id: &str,
+    bytes: &[u8],
+    complete_start: bool,
+) -> Result<SessionHistory, String> {
+    let mut messages = HistoryBuffer::default();
+    let mut events = HistoryBuffer::default();
+    let lines = complete_lines(bytes, complete_start, true).collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(MAX_RECORDS);
+    messages.truncated = start != 0;
+    events.truncated = start != 0;
+    for line in lines.into_iter().skip(start) {
+        let record: Value = serde_json::from_slice(line)
+            .map_err(|_| "The selected chat history contains a malformed record")?;
+        let kind = record.get("type").and_then(Value::as_str);
+        match provider {
+            Provider::Claude => {
+                if record.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+                    return Err("The selected chat belongs to a subagent".into());
+                }
+                let Some(role @ ("user" | "assistant")) = kind else {
+                    continue;
+                };
+                if !record
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.eq_ignore_ascii_case(session_id))
+                {
+                    continue;
+                }
+                messages.push(role, history_text(record.pointer("/message/content")));
+            }
+            Provider::Codex => {
+                let Some(payload) = record.get("payload") else {
+                    continue;
+                };
+                match (kind, payload.get("type").and_then(Value::as_str)) {
+                    (Some("response_item"), Some("message")) => {
+                        let Some(role @ ("user" | "assistant")) =
+                            payload.get("role").and_then(Value::as_str)
+                        else {
+                            continue;
+                        };
+                        messages.push(role, history_text(payload.get("content")));
+                    }
+                    (Some("event_msg"), Some("user_message")) => {
+                        events.push("user", history_text(payload.get("message")));
+                    }
+                    (Some("event_msg"), Some("agent_message")) => {
+                        events.push("assistant", history_text(payload.get("message")));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    // Codex records the same conversation twice; response items preserve genuine repeated messages.
+    Ok(if messages.messages.is_empty() {
+        events.finish()
+    } else {
+        messages.finish()
+    })
 }
 
 fn configured_root(provider: Provider) -> Result<PathBuf, String> {
@@ -954,6 +1248,270 @@ mod tests {
                 .starts_with("sleekssh-session-list-"));
             fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn history_rejects_invalid_provider_and_session_id_before_reading_files() {
+        for provider in ["", "Claude", "../codex", "codex; whoami"] {
+            assert!(
+                get_local_agent_history(provider.to_string(), SESSION_ID.to_string())
+                    .await
+                    .is_err()
+            );
+        }
+        for id in ["", "last", "../outside", "x".repeat(UUID_BYTES).as_str()] {
+            assert!(get_local_agent_history("codex".to_string(), id.to_string())
+                .await
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn history_reads_only_selected_claude_chat_and_text_blocks() {
+        let fixture = Fixture::new();
+        fixture.write(
+            format!("projects/example/{SECOND_ID}.jsonl"),
+            "unrelated malformed private content",
+        );
+        fixture.write(format!("projects/example/{SESSION_ID}.jsonl"), &[
+            json!({"type":"user","sessionId":SESSION_ID,"message":{"content":"Inspect nginx"}}),
+            json!({"type":"assistant","sessionId":SESSION_ID,"message":{"content":[{"type":"thinking","thinking":"private reasoning"},{"type":"text","text":"Checking"},{"type":"tool_use","input":{"secret":"hidden"}},{"type":"text","text":"Ready"}]}}),
+            json!({"type":"user","sessionId":SECOND_ID,"message":{"content":"other chat"}}),
+            json!({"type":"user","sessionId":SESSION_ID,"message":{"content":[{"type":"tool_result","content":"private output"}]}}),
+            json!({"type":"assistant","sessionId":SESSION_ID,"message":{"content":null}}),
+        ].iter().map(Value::to_string).collect::<Vec<_>>().join("\n"));
+        let history = history_from_root(Provider::Claude, &fixture.0, SESSION_ID).unwrap();
+        assert_eq!(
+            history.messages,
+            [
+                HistoryMessage {
+                    role: "user".into(),
+                    text: "Inspect nginx".into()
+                },
+                HistoryMessage {
+                    role: "assistant".into(),
+                    text: "Checking\nReady".into()
+                },
+            ]
+        );
+        assert!(!history.truncated);
+    }
+
+    #[test]
+    fn codex_history_prefers_response_items_without_deduplicating_real_repeated_messages() {
+        let fixture = Fixture::new();
+        fixture.write(
+            format!("sessions/rollout-{SECOND_ID}.jsonl"),
+            "unrelated malformed private content",
+        );
+        let records = [
+            json!({"type":"session_meta","payload":{"id":SESSION_ID,"source":"cli"}}),
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"Hello"}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]}}),
+            json!({"type":"event_msg","payload":{"type":"agent_message","message":"Ready"}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Ready"}]}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Hello"}]}}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","output":"hidden tool result"}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"hidden instructions"}]}}),
+        ];
+        fixture.write(
+            format!("sessions/rollout-{SESSION_ID}.jsonl"),
+            &records
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let history = history_from_root(Provider::Codex, &fixture.0, SESSION_ID).unwrap();
+        assert_eq!(
+            history
+                .messages
+                .iter()
+                .map(|message| (message.role.as_str(), message.text.as_str()))
+                .collect::<Vec<_>>(),
+            [("user", "Hello"), ("assistant", "Ready"), ("user", "Hello")]
+        );
+        assert!(!history.truncated);
+    }
+
+    #[test]
+    fn codex_history_supports_event_only_transcripts_and_rejects_mismatched_headers() {
+        let fixture = Fixture::new();
+        let path = format!("sessions/rollout-{SESSION_ID}.jsonl");
+        fixture.write(
+            &path,
+            &format!(
+                "{}\n{}\n{}",
+                json!({"type":"session_meta","payload":{"id":SESSION_ID}}),
+                json!({"type":"event_msg","payload":{"type":"user_message","message":"Inspect"}}),
+                json!({"type":"event_msg","payload":{"type":"agent_message","message":"Done"}})
+            ),
+        );
+        let history = history_from_root(Provider::Codex, &fixture.0, SESSION_ID).unwrap();
+        assert_eq!(
+            history
+                .messages
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Inspect", "Done"]
+        );
+        fixture.write(
+            &path,
+            &json!({"type":"session_meta","payload":{"id":SECOND_ID}}).to_string(),
+        );
+        assert!(history_from_root(Provider::Codex, &fixture.0, SESSION_ID)
+            .unwrap_err()
+            .contains("does not match"));
+    }
+
+    #[test]
+    fn history_empty_missing_and_malformed_records_have_explicit_results() {
+        let fixture = Fixture::new();
+        for provider in [Provider::Claude, Provider::Codex] {
+            assert!(
+                history_from_root(provider, &fixture.0.join("missing"), SESSION_ID)
+                    .unwrap()
+                    .messages
+                    .is_empty()
+            );
+            assert!(history_from_root(provider, &fixture.0, SESSION_ID)
+                .unwrap()
+                .messages
+                .is_empty());
+        }
+        let path = format!("projects/example/{SESSION_ID}.jsonl");
+        fixture.write(&path, "");
+        assert!(history_from_root(Provider::Claude, &fixture.0, SESSION_ID)
+            .unwrap()
+            .messages
+            .is_empty());
+        fixture.write(&path, "malformed");
+        assert!(history_from_root(Provider::Claude, &fixture.0, SESSION_ID)
+            .unwrap_err()
+            .contains("malformed"));
+        fixture.write(&path, &json!({"type":"user","sessionId":SESSION_ID,"isSidechain":true,"message":{"content":"hidden"}}).to_string());
+        assert!(history_from_root(Provider::Claude, &fixture.0, SESSION_ID).is_err());
+    }
+
+    #[test]
+    fn history_strips_only_the_exact_automation_user_prompt_wrapper() {
+        let wrapped = format!(
+            "{}\n\nUser task:\nInspect nginx\n",
+            crate::automation::REMOTE_AUTOMATION_INSTRUCTIONS
+        );
+        let ordinary = "User task:\nKeep this text\n";
+        let similar = format!(
+            "{} changed\n\nUser task:\nKeep this too\n",
+            crate::automation::REMOTE_AUTOMATION_INSTRUCTIONS
+        );
+        let mut history = HistoryBuffer::default();
+        history.push("user", wrapped.clone());
+        history.push("user", ordinary.into());
+        history.push("user", similar.clone());
+        history.push("assistant", wrapped.clone());
+        assert_eq!(
+            history
+                .finish()
+                .messages
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Inspect nginx",
+                ordinary,
+                similar.as_str(),
+                wrapped.as_str()
+            ]
+        );
+    }
+
+    #[test]
+    fn history_limits_retain_recent_messages_and_bound_unicode_text() {
+        let mut history = HistoryBuffer::default();
+        for index in 0..=MAX_HISTORY_MESSAGES {
+            history.push("user", index.to_string());
+        }
+        let history = history.finish();
+        assert!(history.truncated);
+        assert_eq!(history.messages.len(), MAX_HISTORY_MESSAGES);
+        assert_eq!(history.messages[0].text, "1");
+        let mut history = HistoryBuffer::default();
+        history.push("user", "old".into());
+        history.push("assistant", "é".repeat(MAX_HISTORY_CHARACTERS + 1));
+        let history = history.finish();
+        assert!(history.truncated);
+        assert_eq!(history.messages.len(), 1);
+        assert_eq!(
+            history.messages[0].text.chars().count(),
+            MAX_HISTORY_CHARACTERS
+        );
+        let fixture = Fixture::new();
+        fixture.write(
+            format!("projects/example/{SESSION_ID}.jsonl"),
+            &format!(
+                "{}\n{}\n",
+                "x".repeat(MAX_HISTORY_READ_BYTES),
+                json!({"type":"user","sessionId":SESSION_ID,"message":{"content":"recent"}})
+            ),
+        );
+        let history = history_from_root(Provider::Claude, &fixture.0, SESSION_ID).unwrap();
+        assert!(history.truncated);
+        assert_eq!(history.messages[0].text, "recent");
+        let records = format!(
+            "{}{}",
+            "{}\n".repeat(MAX_RECORDS),
+            json!({"type":"user","sessionId":SESSION_ID,"message":{"content":"latest record"}})
+        );
+        let history =
+            parse_history(Provider::Claude, SESSION_ID, records.as_bytes(), true).unwrap();
+        assert!(history.truncated);
+        assert_eq!(history.messages[0].text, "latest record");
+    }
+
+    #[test]
+    fn history_rejects_nonregular_roots_and_selected_files() {
+        let fixture = Fixture::new();
+        let file = fixture.write("not-a-directory", "private");
+        assert!(history_from_root(Provider::Claude, &file, SESSION_ID).is_err());
+        fs::create_dir_all(
+            fixture
+                .0
+                .join(format!("projects/example/{SESSION_ID}.jsonl")),
+        )
+        .unwrap();
+        assert!(history_from_root(Provider::Claude, &fixture.0, SESSION_ID).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_cannot_follow_linked_roots_directories_or_selected_files() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let outside = Fixture::new();
+        outside.write(
+            format!("projects/example/{SESSION_ID}.jsonl"),
+            "private outside content",
+        );
+        symlink(&outside.0, fixture.0.join("linked-root")).unwrap();
+        assert!(
+            history_from_root(Provider::Claude, &fixture.0.join("linked-root"), SESSION_ID)
+                .is_err()
+        );
+        symlink(outside.0.join("projects"), fixture.0.join("projects")).unwrap();
+        assert!(history_from_root(Provider::Claude, &fixture.0, SESSION_ID).is_err());
+        let selected = Fixture::new();
+        fs::create_dir_all(selected.0.join("projects/example")).unwrap();
+        symlink(
+            outside
+                .0
+                .join(format!("projects/example/{SESSION_ID}.jsonl")),
+            selected
+                .0
+                .join(format!("projects/example/{SESSION_ID}.jsonl")),
+        )
+        .unwrap();
+        assert!(history_from_root(Provider::Claude, &selected.0, SESSION_ID).is_err());
     }
 
     #[tokio::test]

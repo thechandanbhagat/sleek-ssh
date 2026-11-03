@@ -6,6 +6,14 @@ let savedProfiles = [];
 let savedVpnProfiles = [];
 let activeSessions = {}; // sessionId -> { id, name, host, term, fitAddon, container, isClosed }
 let activeTabId = null;
+const terminalGroups = window.SleekSshPanes?.createTerminalGroups();
+const paneLayouts = new Map();
+const splittingTabs = new Set();
+const closingTabs = new Set();
+const sessionDisposals = new Map();
+let pendingPaneSplit = null;
+const PANE_REFIT_DELAY_MS = 50;
+const PANE_PERCENT = 100;
 let automationPanel = null;
 let vpnOperationCancelRequested = false;
 let vpnConnectionActive = false;
@@ -17,6 +25,11 @@ let quickConnectModalTrigger = null;
 let notificationElement = null;
 let notificationTimeoutId = null;
 let commandPalette = null;
+let sessionPaletteSession = null;
+let remoteFoldersForm = null;
+let remoteFolderDialog = null;
+let savedWorkspaces = null;
+let workspaceSidebarOrigin = null;
 let agentUiState = { open: false, running: false, review: false, targetSessionId: null };
 let vpnStatusSnapshot = { state: "unknown", server: null };
 const NAMESPACE_SEPARATOR = "/";
@@ -189,6 +202,7 @@ function base64ToBytes(base64) {
 function createWorkspaceTab(sessionId, kind, title) {
   const kindConfig = TAB_KIND_CONFIG[kind];
   if (!kindConfig) throw new Error(`Unsupported workspace tab kind: ${kind}`);
+  terminalGroups?.add(sessionId);
 
   const tabElement = document.createElement("div");
   tabElement.className = "terminal-tab active";
@@ -341,7 +355,7 @@ function isSudoSessionConnected(session) {
 }
 
 function canSendSudoPassword(session) {
-  if (!isSudoSessionConnected(session) || activeTabId !== session.id || !session.sudoPromptReady || !session.sudoPromptId) return false;
+  if (!isSudoSessionConnected(session) || getActiveSession() !== session || !session.sudoPromptReady || !session.sudoPromptId) return false;
   const state = getSudoShortcutState(session);
   return !state.pending && Date.now() - state.readyAt < SUDO_PROMPT_EXPIRY_MS;
 }
@@ -356,12 +370,12 @@ async function sendSudoPassword(session) {
   const generation = state.generation;
   try {
     await invoke("send_sudo_password", { sessionId: connectionId, promptId });
-    if (state.generation === generation && activeSessions[session.id] === session && session.connectionId === connectionId && activeTabId === session.id) {
+    if (state.generation === generation && activeSessions[session.id] === session && session.connectionId === connectionId && getActiveSession() === session) {
       showNotification("Saved sudo password submitted.");
     }
     return true;
   } catch {
-    if (state.generation === generation && activeSessions[session.id] === session && session.connectionId === connectionId && activeTabId === session.id) {
+    if (state.generation === generation && activeSessions[session.id] === session && session.connectionId === connectionId && getActiveSession() === session) {
       showNotification("Could not submit the saved sudo password. Wait for a new sudo prompt or reconnect.");
     }
     return false;
@@ -475,7 +489,7 @@ async function pasteTerminalClipboard(session, nativeClipboardText) {
     }
     if (!text) return false;
     term.paste(text);
-    if (activeTabId === session.id) term.focus();
+    if (getActiveSession() === session) term.focus();
     return true;
   } catch (error) {
     showNotification(`Could not paste clipboard text: ${error?.message || error}`);
@@ -489,6 +503,7 @@ async function pasteTerminalClipboard(session, nativeClipboardText) {
 function handleTerminalKeyEvent(session, event) {
   if (event.type !== "keydown") return true;
   if (!handleSudoShortcutKeyEvent(session, event)) return false;
+  if (session.commandHistory && !session.commandHistory.handleKeyEvent(event)) return false;
   const term = session.term;
   const key = event.key?.toLowerCase();
   const copyShortcut = (event.ctrlKey || event.metaKey) && !event.altKey && (event.code === "KeyC" || key === "c");
@@ -579,7 +594,7 @@ function initTerminalInteractions(session) {
     document.removeEventListener("contextmenu", dismissOutside, true);
     window.removeEventListener("blur", dismissOnBlur);
     if (activeTerminalContextMenu === controller) activeTerminalContextMenu = null;
-    if (returnFocus && activeSessions[session.id] === session && activeTabId === session.id && !session.isClosing) term.focus();
+    if (returnFocus && activeSessions[session.id] === session && getActiveSession() === session && !session.isClosing) term.focus();
   }
 
   function dismissOutside(event) {
@@ -662,7 +677,7 @@ function initTerminalInteractions(session) {
 }
 
 function markSessionTabAsDisconnected(sessionId) {
-  document.querySelector(`.terminal-tab[data-id="${sessionId}"]`)?.classList.add("connection-terminated");
+  document.querySelector(`.terminal-tab[data-id="${getSessionTabId(sessionId)}"]`)?.classList.add("connection-terminated");
 }
 
 function getSavedSftpExplorerStates() {
@@ -718,7 +733,9 @@ window.addEventListener("DOMContentLoaded", () => {
   initWorkspace();
   initSessionShortcuts();
   initPortKiller();
+  initCommandHistory();
   initAutomationPanel();
+  initSavedWorkspaces();
   initWorkspaceChrome();
   initCommandPaletteIntegration();
 });
@@ -730,11 +747,15 @@ function initAutomationPanel() {
     });
     return;
   }
-  automationPanel = window.SleekSshAutomation.initAutomation({
+  automationPanel = window.SleekSshAutomation.initAutomationSessions({
     invoke,
     listen,
-    getSelectedTarget: () => {
-      const session = activeSessions[activeTabId];
+    getSelectedSessionKey: () => {
+      const session = getActiveSession();
+      return session?.kind === "ssh" && !session.isClosing ? session.id : null;
+    },
+    getTargetForSession: (key) => {
+      const session = activeSessions[key];
       if (!session || session.kind !== "ssh" || !session.connectionId || session.connectionStatus !== "connected"
         || session.isClosed || session.isClosing || session.isConnecting) return null;
       const profile = session.connectionProfile;
@@ -746,14 +767,196 @@ function initAutomationPanel() {
     },
     onLayoutChange: () => {
       handleAgentPanelLayoutChange();
-      const session = activeSessions[activeTabId];
+      const session = getActiveSession();
       if (session?.term) requestAnimationFrame(() => fitTerminal(session));
     },
     onStateChange: (state) => {
       agentUiState = state;
+      if (state.open) window.SleekSshHistory?.controller?.close();
       refreshWorkspaceChrome();
-    }
+    },
+    onCommandExecuted: (target, command) => window.SleekSshHistory?.controller?.recordAgentCommand({
+      ...target, contextKey: target.historyContextKey ?? target.contextKey
+    }, command),
+    onFiles: () => {
+      const session = getActiveSession();
+      if (session?.kind !== "ssh") return;
+      closeAgentPanel();
+      window.SleekSshHistory?.controller?.close();
+      if (!session.sftpPanelOpen) session.container.querySelector(".session-files-toggle")?.click();
+      session.container.querySelector(".sftp-close")?.focus();
+    },
+    onHistory: () => window.SleekSshHistory?.controller?.open(),
+    onSnippets: () => window.SleekSshHistory?.controller?.openSnippets(),
+    onError: message => showNotification(message)
   });
+}
+
+function initCommandHistory() {
+  if (!window.SleekSshHistory) return;
+  try {
+    window.SleekSshHistory.controller = window.SleekSshHistory.initCommandHistoryIntegration({
+      document,
+      storage: window.localStorage,
+      getSession: () => getActiveSession() ?? null,
+      sendText: (session, text) => {
+        const connectionId = session.connectionId || session.id;
+        const command = session.kind === "local" ? "write_local_terminal" : "write_ssh";
+        invoke(command, { sessionId: connectionId, dataBase64: stringToBase64(text) }).catch(error => {
+          if ((session.connectionId || session.id) !== connectionId) return;
+          session.commandHistory?.reset();
+          showNotification(`Could not insert the historical command: ${String(error)}`);
+        });
+      },
+      writeSnippet: async (session, text) => {
+        if (getActiveSession() !== session || session.isClosed || session.isClosing || session.isConnecting) {
+          throw new Error("The target terminal changed before the snippet could be sent.");
+        }
+        if (session.kind === "local" ? !session.isReady : session.kind !== "ssh" || !session.connectionId) {
+          throw new Error("The target terminal is not ready for a snippet.");
+        }
+        const connectionId = session.connectionId || session.id;
+        const command = session.kind === "local" ? "write_local_terminal" : "write_ssh";
+        await invoke(command, { sessionId: connectionId, dataBase64: stringToBase64(text) });
+      },
+      closeAgent: closeAgentPanel,
+      openAgent: openAgentPanel,
+      openFiles: () => {
+        const session = getActiveSession();
+        if (session?.kind !== "ssh") return;
+        if (!session.sftpPanelOpen) session.container.querySelector(".session-files-toggle")?.click();
+        session.container.querySelector(".sftp-close")?.focus();
+      },
+      onLayoutChange: () => { refreshPanelLayout(); refreshWorkspaceChrome(); },
+      onError: showNotification
+    });
+  } catch (error) {
+    const message = `Command history could not load: ${String(error)}`;
+    const status = document.getElementById("command-history-error");
+    if (status) { status.textContent = message; status.hidden = false; }
+    document.getElementById("btn-command-history-toggle")?.addEventListener("click", () => showNotification(message));
+    showNotification(message);
+  }
+}
+
+// --- SAVED WORKSPACES ---
+function initSavedWorkspaces() {
+  const root = document.getElementById("saved-workspaces-panel");
+  if (!root) return;
+  if (!window.SleekSshWorkspaces) {
+    root.textContent = "Saved workspaces could not load. Rebuild SleekSSH with npm run tauri.";
+    root.setAttribute("role", "alert");
+    return;
+  }
+  savedWorkspaces = window.SleekSshWorkspaces.initSavedWorkspacesIntegration({
+    root,
+    storage: localStorage,
+    prepare: async () => { savedProfiles = await invoke("load_connections"); },
+    getState: captureWorkspaceState,
+    openTab: openWorkspaceTab,
+    hasSession: id => Boolean(activeSessions[id] && !activeSessions[id].isClosing),
+    applyLayout: restoreWorkspaceLayout,
+    notify: showNotification
+  });
+}
+
+function captureWorkspaceState() {
+  const activeSession = getActiveSession();
+  const historyPanel = document.getElementById("command-history-panel");
+  const historyOpen = historyPanel?.hidden === false;
+  const historyView = historyPanel?.dataset.view === "snippets" ? "snippets" : "history";
+  return {
+    sessions: Array.from(tabsContainer.querySelectorAll(".terminal-tab")).map(tab => {
+      const group = terminalGroups?.get(tab.dataset.id);
+      const primary = activeSessions[group?.sessionIds[0] ?? tab.dataset.id];
+      if (!primary || group?.sessionIds.length !== 2) return primary;
+      return { ...primary, split: { direction: group.direction, ratio: group.ratio,
+        activePaneIndex: group.sessionIds.indexOf(group.activeSessionId), secondary: activeSessions[group.sessionIds[1]] } };
+    }).filter(Boolean),
+    activeSessionId: activeSession?.id ?? null,
+    profileIds: savedProfiles.map(profile => profile.id),
+    layout: {
+      ...panelLayoutPreferences,
+      sidebarView: workspaceSidebarOrigin?.sidebarView || document.querySelector(".nav-tab.active")?.dataset.tab || "connections",
+      sidebarOpen: workspaceSidebarOrigin?.sidebarOpen ?? panelLayoutPreferences.sidebarOpen,
+      sidePanel: historyOpen ? historyView : agentUiState.open ? "agent"
+        : activeSession?.kind === "ssh" && activeSession.sftpPanelOpen !== false ? "files" : "none"
+    }
+  };
+}
+
+async function openWorkspaceTab(tab) {
+  if (!tab.split) return openWorkspaceTerminal(tab);
+  const opened = [];
+  const errors = [];
+  for (const [index, pane] of [tab, tab.split.secondary].entries()) {
+    try {
+      const result = await openWorkspaceTerminal(pane);
+      if (result.error) errors.push(`Pane ${index + 1}: ${result.error}`);
+      opened.push({ ...result, index });
+    } catch (error) { errors.push(`Pane ${index + 1}: ${String(error)}`); }
+  }
+  const available = opened.filter(result => activeSessions[result.sessionId] && !activeSessions[result.sessionId].isClosing);
+  if (!available.length) throw new Error(errors.join(" ") || "Both panes were closed while opening.");
+  const successful = available.filter(result => !result.error);
+  if (successful.length === 1 && available.length === 2) {
+    const failed = available.find(result => result.error);
+    await closeTab(getSessionTabId(failed.sessionId));
+    return { sessionId: successful[0].sessionId, error: errors.join(" ") };
+  }
+  if (available.length === 2) {
+    const tabId = getSessionTabId(available[0].sessionId);
+    terminalGroups.split(tabId, available[1].sessionId, tab.split.direction);
+    document.querySelector(`.terminal-tab[data-id="${available[1].sessionId}"]`)?.remove();
+    terminalGroups.resize(tabId, tab.split.ratio);
+    terminalGroups.focus(available[tab.split.activePaneIndex].sessionId);
+    renderPaneGroup(tabId);
+  }
+  const focused = available.find(result => result.index === tab.split.activePaneIndex) ?? available[0];
+  return { sessionId: focused.sessionId, error: errors.length ? errors.join(" ") : undefined };
+}
+
+async function openWorkspaceTerminal(tab, paneDestination = null) {
+  if (tab.kind === "local") {
+    const session = await openLocalTerminal(tab.shell, tab.workingDirectory, tab.locationName, paneDestination);
+    if (!session || !activeSessions[session.id]) throw new Error("The terminal was closed while opening.");
+    return { sessionId: session.id, error: session.launchError || (session.isClosed ? "The local shell exited while opening." : undefined) };
+  }
+  const profile = savedProfiles.find(candidate => candidate.id === tab.profileId);
+  if (!profile) throw new Error("This saved host no longer exists. Add it again and update the workspace.");
+  const session = await connectProfile(profile, tab, paneDestination);
+  if (!activeSessions[session.id]) throw new Error("The SSH tab was closed while opening.");
+  return {
+    sessionId: session.id,
+    error: session.connectionError || (session.isClosed ? "The SSH connection closed while opening." : undefined)
+  };
+}
+
+function restoreWorkspaceLayout(layout, sessionId) {
+  closeAgentPanel();
+  window.SleekSshHistory?.controller?.close();
+  activateSession(sessionId);
+  activateSidebarView(layout.sidebarView, { keepOpen: true });
+  panelLayoutPreferences = {
+    sidebarWidth: layout.sidebarWidth, sftpWidth: layout.sftpWidth, sidebarOpen: layout.sidebarOpen
+  };
+  savePanelLayoutPreferences();
+  const session = activeSessions[sessionId];
+  if (session?.kind === "ssh" && (layout.sidePanel === "files" || layout.sidePanel === "none")) {
+    session.sftpPanelOpen = layout.sidePanel === "files";
+    session.container.classList.toggle("sftp-collapsed", !session.sftpPanelOpen);
+    saveSftpExplorerState(session);
+  }
+  if (layout.sidePanel === "history") window.SleekSshHistory?.controller?.open();
+  if (layout.sidePanel === "snippets") window.SleekSshHistory?.controller?.openSnippets();
+  if (layout.sidePanel === "agent") openAgentPanel();
+  refreshPanelLayout();
+  refreshWorkspaceChrome();
+}
+
+function showWorkspaceSave() {
+  activateSidebarView("workspaces", { keepOpen: true });
+  savedWorkspaces?.showSave();
 }
 
 // --- PANEL LAYOUT ---
@@ -847,10 +1050,27 @@ function refreshPanelLayout() {
   const sidebar = document.querySelector(".sidebar");
   if (!app || !sidebar || typeof app.getBoundingClientRect !== "function") return;
   const agentPanel = document.getElementById("automation-panel");
-  const agentWidth = agentPanel && agentPanel.hidden === false ? getMeasuredLayoutWidth(agentPanel) : 0;
-  const agentOpen = agentWidth > 0;
-  const totalWidth = Math.max(0, app.getBoundingClientRect().width - getMeasuredLayoutWidth(document.querySelector(".activity-rail")) - agentWidth);
-  const activeSession = activeSessions[activeTabId];
+  const historyPanel = document.getElementById("command-history-panel");
+  const dockPanel = agentPanel?.hidden === false ? agentPanel : historyPanel?.hidden === false ? historyPanel : null;
+  const agentOpen = Boolean(dockPanel);
+  const availableWidth = Math.max(0, app.getBoundingClientRect().width - getMeasuredLayoutWidth(document.querySelector(".activity-rail")));
+  const sharedWidths = getPanelLayoutWidths(availableWidth, panelLayoutPreferences.sidebarWidth, panelLayoutPreferences.sftpWidth, panelLayoutPreferences.sidebarOpen, true);
+  const activeSession = getActiveSession();
+  const activeGroup = activeSession && terminalGroups?.forSession(activeSession.id);
+  const split = activeGroup?.sessionIds.length === 2;
+  const paneShare = split && activeGroup.direction === "right"
+    ? activeGroup.sessionIds[0] === activeSession.id ? activeGroup.ratio : 1 - activeGroup.ratio : 1;
+  // Recover the pane's width before the dock shrinks the terminal workspace.
+  const focusedPaneWidth = split ? getMeasuredLayoutWidth(activeSession.container) + getMeasuredLayoutWidth(dockPanel) * paneShare
+    : availableWidth - sharedWidths.sidebarWidth;
+  const focusedWidths = getPanelLayoutWidths(focusedPaneWidth, 0, panelLayoutPreferences.sftpWidth, false, true);
+  const sidePanelWidth = Math.min(sharedWidths.sftpWidth, focusedWidths.sftpWidth || sharedWidths.sftpWidth);
+  app.style.setProperty("--side-panel-width", `${sidePanelWidth}px`);
+  [agentPanel, historyPanel].filter(Boolean).forEach(panel => {
+    panel.classList.toggle("side-panel-auto-collapsed", sidePanelWidth === 0);
+    panel.inert = panel.hidden || sidePanelWidth === 0;
+  });
+  const totalWidth = availableWidth - (agentOpen ? sidePanelWidth : 0);
   const sftpOpen = !agentOpen && activeSession?.kind === "ssh" && activeSession.sftpPanelOpen !== false;
   const widths = getPanelLayoutWidths(totalWidth, panelLayoutPreferences.sidebarWidth, panelLayoutPreferences.sftpWidth, panelLayoutPreferences.sidebarOpen, sftpOpen);
   app.style.setProperty("--sidebar-width", `${widths.sidebarWidth}px`);
@@ -863,17 +1083,24 @@ function refreshPanelLayout() {
     sidebarToggle.setAttribute("aria-label", sidebarToggle.title);
   }
   updatePanelSeparator(document.getElementById("sidebar-resize-handle"), widths.sidebarWidth, PANEL_LAYOUT_LIMITS.sidebarMinimum, Math.min(PANEL_LAYOUT_LIMITS.sidebarMaximum, totalWidth - PANEL_LAYOUT_LIMITS.terminalMinimum - (sftpOpen && !widths.sftpAutoCollapsed ? PANEL_LAYOUT_LIMITS.sftpMinimum : 0)));
+  const sidePanelMaximum = Math.min(PANEL_LAYOUT_LIMITS.sftpMaximum, availableWidth - widths.sidebarWidth - PANEL_LAYOUT_LIMITS.terminalMinimum,
+    focusedWidths.sftpWidth > 0 ? focusedPaneWidth - PANEL_LAYOUT_LIMITS.terminalMinimum : PANEL_LAYOUT_LIMITS.sftpMaximum);
+  updatePanelSeparator(document.getElementById("side-panel-resize-handle"), agentOpen ? sidePanelWidth : 0, PANEL_LAYOUT_LIMITS.sftpMinimum, sidePanelMaximum);
   Object.values(activeSessions).forEach((session) => {
     if (!session.container || session.kind !== "ssh") return;
-    const sessionWidths = getPanelLayoutWidths(totalWidth - widths.sidebarWidth, 0, panelLayoutPreferences.sftpWidth, false, !agentOpen && session.sftpPanelOpen !== false);
+    const split = terminalGroups?.forSession(session.id)?.sessionIds.length === 2;
+    const paneWidth = split ? getMeasuredLayoutWidth(session.container) : totalWidth - widths.sidebarWidth;
+    const filesVisible = !agentOpen && session.sftpPanelOpen !== false && (!split || activeSession === session);
+    const sessionWidths = getPanelLayoutWidths(paneWidth, 0, panelLayoutPreferences.sftpWidth, false, filesVisible);
     session.container.style.setProperty("--sftp-panel-width", `${sessionWidths.sftpWidth}px`);
+    session.container.classList.toggle("pane-files-hidden", split && activeSession !== session);
     session.container.classList.toggle("sftp-auto-collapsed", !agentOpen && sessionWidths.sftpAutoCollapsed);
     const panel = session.container.querySelector(".sftp-panel");
     if (panel) panel.inert = sessionWidths.sftpWidth === 0;
-    updatePanelSeparator(session.container.querySelector(".sftp-resize-handle"), sessionWidths.sftpWidth, PANEL_LAYOUT_LIMITS.sftpMinimum, Math.min(PANEL_LAYOUT_LIMITS.sftpMaximum, totalWidth - widths.sidebarWidth - PANEL_LAYOUT_LIMITS.terminalMinimum));
+    updatePanelSeparator(session.container.querySelector(".sftp-resize-handle"), sessionWidths.sftpWidth, PANEL_LAYOUT_LIMITS.sftpMinimum, Math.min(PANEL_LAYOUT_LIMITS.sftpMaximum, paneWidth - PANEL_LAYOUT_LIMITS.terminalMinimum));
     if (session.term && typeof updateSessionToolbar === "function") updateSessionToolbar(session);
   });
-  if (activeSession?.term) fitTerminal(activeSession);
+  if (activeTabId) getTabSessionIds(activeTabId).forEach(id => { if (activeSessions[id]?.term) fitTerminal(activeSessions[id]); });
 }
 
 function toggleSidebarPanel() {
@@ -938,6 +1165,11 @@ function initPanelLayout() {
   panelLayoutPreferences = readPanelLayoutPreferences();
   document.getElementById("btn-sidebar-toggle")?.addEventListener("click", toggleSidebarPanel);
   bindPanelResizeHandle(document.getElementById("sidebar-resize-handle"), "sidebar", () => document.querySelector(".sidebar").getBoundingClientRect().width);
+  bindPanelResizeHandle(document.getElementById("side-panel-resize-handle"), "sftp", () => {
+    const agentPanel = document.getElementById("automation-panel");
+    const historyPanel = document.getElementById("command-history-panel");
+    return getMeasuredLayoutWidth(agentPanel?.hidden === false ? agentPanel : historyPanel);
+  });
   window.addEventListener("resize", refreshPanelLayout);
   refreshPanelLayout();
 }
@@ -968,7 +1200,7 @@ function initWindowControls() {
   // reach the xterm.js terminal rather than being swallowed by WebView2.
   appWindow.onFocusChanged(({ payload: focused }) => {
     if (focused && activeTabId) {
-      const session = activeSessions[activeTabId];
+      const session = getActiveSession();
       if (session && session.term && !session.isClosed) {
         session.term.focus();
       }
@@ -1136,6 +1368,13 @@ function activateSidebarView(view, { keepOpen = false } = {}) {
   const tab = Array.from(sidebarTabs).find(candidate => candidate.dataset.tab === view);
   if (!tab || tab.classList.contains("hidden")) return;
   const alreadyActive = tab.classList.contains("active");
+  if (view === "workspaces" && !alreadyActive) {
+    // The management view should not replace the working layout captured by Save or Update.
+    workspaceSidebarOrigin = {
+      sidebarView: Array.from(sidebarTabs).find(candidate => candidate.classList.contains("active"))?.dataset.tab || "connections",
+      sidebarOpen: panelLayoutPreferences.sidebarOpen
+    };
+  } else if (view !== "workspaces") workspaceSidebarOrigin = null;
   if (alreadyActive && isSidebarVisible() && !keepOpen) {
     toggleSidebarPanel();
     return;
@@ -1996,6 +2235,13 @@ function updateProfileSudoFields() {
 
 async function saveProfileFromForm() {
   if (profileSavePending) return false;
+  let folderSettings;
+  try { folderSettings = remoteFoldersForm?.read(); }
+  catch (error) {
+    profileSaveError.textContent = String(error);
+    profileSaveError.classList.remove("hidden");
+    return false;
+  }
   const id = document.getElementById("prof-id").value || "prof_" + Date.now();
   const newProfile = {
     id,
@@ -2062,6 +2308,7 @@ async function saveProfileFromForm() {
     }
     if (initialProfiles !== nextProfiles) await invoke("save_connections", { connections: nextProfiles });
     savedProfiles = await invoke("load_connections");
+    if (folderSettings) remoteFoldersForm.save(id, folderSettings);
     hideProfileModal();
     initProfileList();
     if (newProfile.sudo_shortcut_enabled) showNotification("Sudo shortcut saved. Reconnect this profile to activate it.");
@@ -2080,6 +2327,10 @@ async function saveProfileFromForm() {
 }
 
 function initModal() {
+  const foldersRoot = document.getElementById("prof-remote-folders-settings");
+  if (foldersRoot && window.SleekSshRemoteFolders) {
+    remoteFoldersForm = window.SleekSshRemoteFolders.initRemoteFoldersForm(foldersRoot, localStorage);
+  }
   btnAddProfile.addEventListener("click", () => showProfileModal());
   btnCloseModal.addEventListener("click", hideProfileModal);
   btnCancelModal.addEventListener("click", hideProfileModal);
@@ -2165,6 +2416,11 @@ function showProfileModal(profile = null, prefill = null) {
 
   updateProfileSudoFields();
   profileModal.classList.remove("hidden");
+  try { remoteFoldersForm?.load(profile?.id ?? null); }
+  catch (error) {
+    profileSaveError.textContent = `Could not load remote folders: ${String(error)}`;
+    profileSaveError.classList.remove("hidden");
+  }
   window.setTimeout(() => {
     const focusTarget = prefill && !prefill.username ? document.getElementById("prof-username") : document.getElementById("prof-name");
     focusTarget.focus();
@@ -2217,7 +2473,7 @@ function hideQuickConnectModal() {
 }
 
 function duplicateActiveSession() {
-  const activeSession = activeTabId ? activeSessions[activeTabId] : null;
+  const activeSession = activeTabId ? getActiveSession() : null;
 
   if (activeSession?.kind === "local" && !activeSession.isClosed) {
     openLocalTerminal(activeSession.shell, activeSession.workingDirectory, activeSession.locationName);
@@ -2234,6 +2490,15 @@ function duplicateActiveSession() {
 
 function initSessionShortcuts() {
   window.addEventListener("keydown", async (event) => {
+    if (event.ctrlKey && event.altKey && !event.shiftKey && !event.repeat
+      && !document.querySelector("dialog[open]") && activeTabId && terminalGroups?.get(activeTabId)?.sessionIds.length === 2) {
+      if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.code)) {
+        event.preventDefault(); event.stopPropagation(); focusOtherPane(); return;
+      }
+      if (event.code === "KeyW") {
+        event.preventDefault(); event.stopPropagation(); await closeTerminalPane(getActiveSession().id); return;
+      }
+    }
     const isTerminalSearchShortcut = (event.ctrlKey || event.metaKey)
       && !event.altKey
       && !event.shiftKey
@@ -2254,17 +2519,26 @@ function initSessionShortcuts() {
       && !event.altKey
       && event.code === "KeyP"
       && !event.repeat;
+    const isSshPaletteShortcut = (event.ctrlKey || event.metaKey)
+      && event.shiftKey
+      && !event.altKey
+      && event.code === "KeyK"
+      && !event.repeat;
 
-    if (isCommandPaletteShortcut) {
+    if (isCommandPaletteShortcut || isSshPaletteShortcut) {
+      if (document.querySelector("dialog[open]")) return;
+      if (isSshPaletteShortcut && getActiveSession()?.kind !== "ssh") return;
+      const mode = isSshPaletteShortcut ? "session" : "all";
       event.preventDefault();
       event.stopPropagation();
-      if (commandPalette?.isOpen()) commandPalette.close();
-      else openCommandPalette("all");
+      const sameSession = mode !== "session" || sessionPaletteSession === getActiveSession();
+      if (commandPalette?.isOpen(mode) && sameSession) commandPalette.close();
+      else openCommandPalette(mode);
       return;
     }
 
     if (isTerminalSearchShortcut) {
-      const activeSession = activeTabId ? activeSessions[activeTabId] : null;
+      const activeSession = activeTabId ? getActiveSession() : null;
       if (!activeSession?.term || activeSession.search?.isDisposed) return;
 
       event.preventDefault();
@@ -2275,7 +2549,7 @@ function initSessionShortcuts() {
 
     if (isCloseSessionShortcut) {
       const sessionId = activeTabId;
-      const activeSession = sessionId ? activeSessions[sessionId] : null;
+      const activeSession = getActiveSession();
       if (!activeSession) return;
 
       event.preventDefault();
@@ -2301,6 +2575,7 @@ function initSessionShortcuts() {
 
 // --- WORKSPACE & TAB MANAGEMENT ---
 function initWorkspace() {
+  initPanePicker();
   if (window.SleekSshLocalTerminals) {
     window.SleekSshLocalTerminals.initLocalTerminalPanel({
       root: document.getElementById("local-locations"),
@@ -2403,18 +2678,217 @@ function initWorkspace() {
   });
 }
 
-function switchTab(sessionId) {
-  if (activeTabId !== sessionId) {
-    activeSessions[activeTabId]?.terminalInteractions?.close(false);
-    resetSudoShortcut(activeSessions[activeTabId], false);
-    resetSudoShortcut(activeSessions[sessionId], false);
+function getActiveSession() {
+  if (!activeTabId) return undefined;
+  return activeSessions[terminalGroups?.get(activeTabId)?.activeSessionId ?? activeTabId];
+}
+
+function getSessionTabId(sessionId) {
+  return terminalGroups?.forSession(sessionId)?.id ?? sessionId;
+}
+
+function getTabSessionIds(tabId) {
+  return terminalGroups?.get(tabId)?.sessionIds ?? [tabId];
+}
+
+function activateSession(sessionId, { focusTerminal = true } = {}) {
+  const session = activeSessions[sessionId];
+  if (!session || session.isClosing) return;
+  const previous = getActiveSession();
+  if (previous !== session) {
+    previous?.terminalInteractions?.close(false);
+    resetSudoShortcut(previous, false);
+    resetSudoShortcut(session, false);
   }
-  activeTabId = sessionId;
+  if (terminalGroups?.forSession(sessionId)) terminalGroups.focus(sessionId);
+  switchTab(getSessionTabId(sessionId), { focusTerminal });
+}
+
+function updatePaneTab(tabId) {
+  const tab = document.querySelector(`.terminal-tab[data-id="${tabId}"]`);
+  if (!tab) return;
+  const sessions = getTabSessionIds(tabId).map(id => activeSessions[id]).filter(Boolean);
+  if (!sessions.length) return;
+  const focused = sessions.find(session => session.id === terminalGroups?.get(tabId)?.activeSessionId) ?? sessions[0];
+  tab.dataset.kind = focused.kind;
+  const icon = tab.querySelector(".tab-kind-icon");
+  if (icon) icon.innerHTML = `${TAB_KIND_CONFIG[focused.kind].icon}<span class="tab-status-dot" aria-hidden="true"></span>`;
+  updateWorkspaceTabTitle(tab, sessions.map(session => session.name).join(" | "));
+  const states = sessions.map(getSessionConnectionState);
+  tab.dataset.status = states.includes("connecting") ? "connecting" : states.includes("disconnected") ? "disconnected" : states[0];
+  tab.classList.toggle("connection-terminated", states.includes("disconnected"));
+}
+
+function renderPaneGroup(tabId) {
+  const group = terminalGroups?.get(tabId);
+  const previous = paneLayouts.get(tabId);
+  previous?.divider.dispose();
+  if (!group || group.sessionIds.length === 1) {
+    if (group) {
+      const session = activeSessions[group.sessionIds[0]];
+      if (session) {
+        delete session.paneLabel;
+        session.container.classList.remove("terminal-pane-focused");
+        session.container.removeAttribute("data-pane");
+        if (previous) workspaceViewport.appendChild(session.container);
+      }
+    }
+    previous?.view.remove();
+    paneLayouts.delete(tabId);
+  } else {
+    const view = previous?.view ?? document.createElement("div");
+    view.className = "terminal-tab-view";
+    view.dataset.tabId = tabId;
+    view.dataset.paneCount = String(group.sessionIds.length);
+    view.dataset.direction = group.direction;
+    view.style.setProperty("--pane-ratio", `${group.ratio * PANE_PERCENT}%`);
+    const dividerElement = document.createElement("div");
+    dividerElement.className = "terminal-pane-divider";
+    const sessions = group.sessionIds.map(id => activeSessions[id]);
+    sessions.forEach((session, index) => {
+      session.paneLabel = `Pane ${index + 1}`;
+      session.container.dataset.pane = String(index + 1);
+    });
+    view.replaceChildren(sessions[0].container, dividerElement, sessions[1].container);
+    if (!view.isConnected) workspaceViewport.appendChild(view);
+    const divider = window.SleekSshPanes.initPaneDivider({
+      handle: dividerElement, container: view, direction: group.direction,
+      getRatio: () => terminalGroups.get(tabId)?.ratio ?? group.ratio,
+      onChange: ratio => {
+        if (!terminalGroups.get(tabId)) return;
+        terminalGroups.resize(tabId, ratio);
+        view.style.setProperty("--pane-ratio", `${ratio * PANE_PERCENT}%`);
+        refreshPanelLayout();
+      }
+    });
+    paneLayouts.set(tabId, { view, divider });
+  }
+  if (group) group.sessionIds.forEach(id => updatePaneControls(activeSessions[id]));
+  updatePaneTab(tabId);
+  window.SleekSshHistory?.controller?.refresh();
+}
+
+function validatePaneDestination(destination) {
+  if (!destination) return;
+  const group = terminalGroups?.get(destination.tabId);
+  if (!group || group.sessionIds.length !== 1 || !activeSessions[group.sessionIds[0]] || activeSessions[group.sessionIds[0]].isClosing) {
+    throw new Error("The target tab is closed or already has two panes.");
+  }
+  if (destination.direction !== "right" && destination.direction !== "below") throw new Error("Choose Split right or Split below.");
+}
+
+function mountTerminalSession(session, destination) {
+  if (destination) {
+    terminalGroups.split(destination.tabId, session.id, destination.direction);
+    document.querySelector(`.terminal-tab[data-id="${session.id}"]`)?.remove();
+    renderPaneGroup(destination.tabId);
+  }
+  const focusPane = () => {
+    if (getActiveSession() !== session) activateSession(session.id, { focusTerminal: false });
+  };
+  session.container.addEventListener("pointerdown", focusPane, true);
+  session.container.addEventListener("focusin", focusPane);
+  session.paneFocusDispose = () => {
+    session.container.removeEventListener("pointerdown", focusPane, true);
+    session.container.removeEventListener("focusin", focusPane);
+  };
+  activateSession(session.id);
+}
+
+function focusOtherPane() {
+  if (!activeTabId) return;
+  const group = terminalGroups?.get(activeTabId);
+  if (group?.sessionIds.length !== 2) return;
+  activateSession(group.sessionIds.find(id => id !== group.activeSessionId));
+}
+
+function showPaneSplit(direction) {
+  const session = getActiveSession();
+  if (!session?.term || !terminalGroups) { showNotification("Select a terminal tab to split."); return; }
+  if (getTabSessionIds(activeTabId).length === 2 || splittingTabs.has(activeTabId)) {
+    showNotification("This tab already has two panes."); return;
+  }
+  validatePaneDestination({ tabId: activeTabId, direction });
+  const dialog = document.getElementById("pane-picker");
+  const select = document.getElementById("pane-picker-terminal");
+  const choices = [
+    { id: "current", label: `Another ${session.name}` },
+    { id: "powershell", label: "PowerShell" },
+    { id: "cmd", label: "Command Prompt" },
+    ...savedProfiles.map(profile => ({ id: `host:${profile.id}`, label: `${profile.name} · ${profile.username}@${profile.host}` })),
+    ...readSavedLocalLocations().map(location => ({ id: `location:${location.id}`, label: `PowerShell · ${location.name || location.path}` }))
+  ];
+  select.replaceChildren(...choices.map(choice => {
+    const option = document.createElement("option"); option.value = choice.id; option.textContent = choice.label; return option;
+  }));
+  document.getElementById("pane-picker-title").textContent = direction === "right" ? "Split right" : "Split below";
+  pendingPaneSplit = { tabId: activeTabId, direction, sourceSessionId: session.id };
+  dialog.showModal();
+  select.focus();
+}
+
+function initPanePicker() {
+  const dialog = document.getElementById("pane-picker");
+  if (!dialog) return;
+  const cancel = () => { pendingPaneSplit = null; dialog.close(); getActiveSession()?.term?.focus(); };
+  document.getElementById("pane-picker-cancel").addEventListener("click", cancel);
+  dialog.addEventListener("cancel", () => { pendingPaneSplit = null; });
+  document.getElementById("pane-picker-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const destination = pendingPaneSplit;
+    if (!destination) return;
+    const choice = document.getElementById("pane-picker-terminal").value;
+    pendingPaneSplit = null;
+    dialog.close();
+    try { await splitActiveTerminal(choice, destination.direction, destination.tabId, destination.sourceSessionId); }
+    catch (error) { showNotification(`Could not split the terminal: ${error instanceof Error ? error.message : String(error)}`); }
+  });
+}
+
+async function splitActiveTerminal(choice, direction, tabId = activeTabId, sourceSessionId = null) {
+  if (splittingTabs.has(tabId)) throw new Error("A second pane is already opening in this tab.");
+  const destination = { tabId, direction };
+  validatePaneDestination(destination);
+  const source = activeSessions[sourceSessionId ?? terminalGroups.get(tabId).activeSessionId];
+  if (!source || getSessionTabId(source.id) !== tabId || !source.term) throw new Error("The source terminal is no longer available.");
+  splittingTabs.add(tabId);
+  try {
+    if (choice === "current") {
+      if (source.kind === "local") return await openLocalTerminal(source.shell, source.workingDirectory, source.locationName, destination);
+      return await connectProfile({ ...source.connectionProfile }, {
+        remotePath: source.terminalPath || source.currentPath, sftpPanelOpen: source.sftpPanelOpen
+      }, destination);
+    }
+    if (choice === "powershell" || choice === "cmd") return await openLocalTerminal(choice, null, null, destination);
+    if (typeof choice === "string" && choice.startsWith("host:")) {
+      const profile = savedProfiles.find(profile => profile.id === choice.slice("host:".length));
+      if (!profile) throw new Error("This saved host no longer exists.");
+      return await connectProfile(profile, null, destination);
+    }
+    if (typeof choice === "string" && choice.startsWith("location:")) {
+      const location = readSavedLocalLocations().find(location => location.id === choice.slice("location:".length));
+      if (!location) throw new Error("This saved local folder no longer exists.");
+      return await openLocalTerminal("powershell", location.path, location.name, destination);
+    }
+    throw new Error("Choose an SSH host or local shell.");
+  } finally { splittingTabs.delete(tabId); }
+}
+
+function switchTab(tabId, { focusTerminal = true } = {}) {
+  const previous = getActiveSession();
+  const sessionIds = getTabSessionIds(tabId);
+  const next = activeSessions[terminalGroups?.get(tabId)?.activeSessionId ?? tabId];
+  if (previous !== next) {
+    previous?.terminalInteractions?.close(false);
+    resetSudoShortcut(previous, false);
+    resetSudoShortcut(next, false);
+  }
+  activeTabId = tabId;
   automationPanel?.refresh();
 
   // Update Tab Elements UI
   document.querySelectorAll(".terminal-tab").forEach(tab => {
-    const isActive = tab.dataset.id === sessionId;
+    const isActive = tab.dataset.id === tabId;
     const activationButton = tab.querySelector(".tab-activation");
     tab.classList.toggle("active", isActive);
     activationButton.setAttribute("aria-selected", String(isActive));
@@ -2424,22 +2898,25 @@ function switchTab(sessionId) {
 
   // Update Container Elements UI
   document.querySelectorAll(".session-container").forEach(container => {
-    if (container.dataset.id === sessionId) {
-      container.classList.add("active");
-    } else {
-      container.classList.remove("active");
-    }
+    const visible = sessionIds.includes(container.dataset.id);
+    container.classList.toggle("active", visible);
+    container.inert = !visible;
+    container.classList.toggle("terminal-pane-focused", visible && sessionIds.length === 2 && container.dataset.id === next?.id);
+    const label = container.querySelector(".pane-focus-label");
+    if (label) { label.hidden = sessionIds.length !== 2 || !visible; label.textContent = container.dataset.id === next?.id ? "Active pane" : `Pane ${container.dataset.pane}`; }
   });
+  paneLayouts.forEach((layout, id) => layout.view.classList.toggle("is-active", id === tabId));
+  updatePaneTab(tabId);
 
   refreshPanelLayout();
   refreshWorkspaceChrome();
 
   // Focus terminal
-  const activeSession = activeSessions[sessionId];
-  if (activeSession && activeSession.term) {
-    activeSession.term.focus();
-    // Refit after active display
-    setTimeout(() => fitTerminal(activeSession), 50);
+  if (next?.term && focusTerminal) next.term.focus();
+  if (next?.term) {
+    setTimeout(() => {
+      if (activeTabId === tabId) sessionIds.forEach(id => fitTerminal(activeSessions[id]));
+    }, PANE_REFIT_DELAY_MS);
   }
 }
 
@@ -2714,19 +3191,29 @@ function createTerminalForSession(session) {
 
   session.terminalInteractions = initTerminalInteractions(session);
   initSudoShortcut(session);
+  session.commandHistory = window.SleekSshHistory?.controller?.attachSession(session);
   term.attachCustomKeyEventHandler(event => handleTerminalKeyEvent(session, event));
 
   return term;
 }
 
-async function closeTab(sessionId) {
+function disposeTerminalSession(sessionId) {
+  if (sessionDisposals.has(sessionId)) return sessionDisposals.get(sessionId);
+  const operation = disposeTerminalSessionOnce(sessionId).finally(() => sessionDisposals.delete(sessionId));
+  sessionDisposals.set(sessionId, operation);
+  return operation;
+}
+
+async function disposeTerminalSessionOnce(sessionId) {
   const session = activeSessions[sessionId];
   if (!session) return;
   session.isClosing = true;
   cancelSshHostTrust(session);
+  await automationPanel?.releaseSession?.(sessionId);
   session.isClosed = true;
   resetSudoShortcut(session);
   session.panelLayoutDispose?.();
+  session.paneFocusDispose?.();
   if (session.kind === "ssh") session.sftpRequestId += 1;
 
   const disconnectCommand = session.kind === "ssh"
@@ -2740,12 +3227,9 @@ async function closeTab(sessionId) {
       await invoke(disconnectCommand, { sessionId: session.connectionId || sessionId });
     } catch (e) {
       console.warn("Disconnect request failed:", e);
+      showNotification(`Could not confirm that ${session.name} disconnected: ${String(e)}`);
     }
   }
-
-  // Remove elements
-  const tabEl = document.querySelector(`.terminal-tab[data-id="${sessionId}"]`);
-  if (tabEl) tabEl.remove();
 
   const containerEl = document.querySelector(`.session-container[data-id="${sessionId}"]`);
   if (containerEl) containerEl.remove();
@@ -2754,24 +3238,52 @@ async function closeTab(sessionId) {
   if (session.term) {
     session.sudoShortcutDispose?.();
     session.terminalInteractions?.dispose();
+    session.commandHistory?.dispose();
     session.toolbarSelectionListener?.dispose();
     disposeTerminalSearch(session);
     session.term.dispose();
   }
 
   delete activeSessions[sessionId];
-  refreshPanelLayout();
+  if (terminalGroups?.forSession(sessionId)) terminalGroups.remove(sessionId);
+}
 
-  // Select next active tab
-  const remainingIds = Object.keys(activeSessions);
-  if (remainingIds.length > 0) {
-    switchTab(remainingIds[remainingIds.length - 1]);
-  } else {
-    activeTabId = null;
-    welcomeScreen.classList.remove("hidden");
-    automationPanel?.refresh();
-    refreshWorkspaceChrome();
-  }
+async function closeTab(tabId) {
+  if (closingTabs.has(tabId)) return;
+  const sessionIds = getTabSessionIds(tabId).filter(id => activeSessions[id]);
+  if (!sessionIds.length) return;
+  closingTabs.add(tabId);
+  sessionIds.forEach(id => { activeSessions[id].isClosing = true; });
+  window.SleekSshHistory?.controller?.refresh();
+  try {
+    await Promise.all(sessionIds.map(disposeTerminalSession));
+    document.querySelector(`.terminal-tab[data-id="${tabId}"]`)?.remove();
+    renderPaneGroup(tabId);
+    const remainingTabs = [...tabsContainer.querySelectorAll(".terminal-tab")];
+    if (activeTabId === tabId && remainingTabs.length) switchTab(remainingTabs.at(-1).dataset.id);
+    else if (remainingTabs.length) { refreshPanelLayout(); refreshWorkspaceChrome(); }
+    else {
+      activeTabId = null;
+      welcomeScreen.classList.remove("hidden");
+      automationPanel?.refresh();
+      refreshWorkspaceChrome();
+    }
+  } finally { closingTabs.delete(tabId); }
+}
+
+async function closeTerminalPane(sessionId) {
+  const session = activeSessions[sessionId];
+  if (!session || session.isClosing) return;
+  const tabId = getSessionTabId(sessionId);
+  const otherId = getTabSessionIds(tabId).find(id => id !== sessionId && activeSessions[id] && !activeSessions[id].isClosing);
+  if (!otherId) return closeTab(tabId);
+  session.isClosing = true;
+  if (getActiveSession() === session) activateSession(otherId);
+  await disposeTerminalSession(sessionId);
+  if (closingTabs.has(tabId)) return;
+  renderPaneGroup(tabId);
+  if (activeTabId === tabId) switchTab(tabId);
+  else { refreshPanelLayout(); refreshWorkspaceChrome(); }
 }
 
 const SESSION_TOOLBAR_ICONS = Object.freeze({
@@ -2804,15 +3316,21 @@ function createSessionToolbarMarkup(kind, profile) {
   return `
     <div class="session-toolbar" data-kind="${kind}">
       <div class="session-context">
+        <span class="pane-focus-label" hidden></span>
         ${context}
       </div>
       <span class="session-state" data-state="connecting" role="status" aria-live="polite">Connecting</span>
       <div class="session-actions" role="group" aria-label="Terminal actions">
         ${kind === "ssh" ? '<button class="btn btn-secondary btn-small session-sudo-password" type="button" title="Submit saved sudo password (F2 three times)" hidden>Sudo · F2 ×3</button>' : ""}
         ${kind === "ssh" ? '<button class="btn btn-primary btn-small btn-reconnect" type="button" hidden>Reconnect</button>' : ""}
+        ${kind === "ssh" ? '<button class="btn btn-secondary btn-small session-shortcuts" type="button" title="SSH session palette: folders and snippets (Ctrl+Shift+K)" aria-keyshortcuts="Control+Shift+K Meta+Shift+K" aria-haspopup="dialog" aria-controls="command-palette">SSH palette</button>' : ""}
         ${action("session-find", "Find in terminal (Ctrl+F)", SESSION_TOOLBAR_ICONS.search)}
         ${action("session-copy-selection", "Copy selection (Ctrl+Shift+C)", SESSION_TOOLBAR_ICONS.copy)}
         ${action("session-paste", "Paste (Ctrl+Shift+V)", SESSION_TOOLBAR_ICONS.paste)}
+        ${action("session-split-right", "Split right", '<rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M12 4v16"></path>')}
+        ${action("session-split-below", "Split below", '<rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 12h18"></path>')}
+        <button class="session-action-button session-close-pane" type="button" title="Close pane (Ctrl+Alt+W)" aria-label="Close pane" hidden><svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.close}</svg></button>
+        <button class="session-history-toggle" type="button" aria-expanded="false" aria-controls="command-history-panel" title="Show command history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.6 7.4M3 5v6h6M12 7v5l3 2"></path></svg><span>History</span></button>
         ${kind === "ssh" ? '<span class="session-divider" aria-hidden="true"></span>' : ""}
         ${kind === "ssh" ? action("session-files-toggle", "Toggle file browser", SESSION_TOOLBAR_ICONS.files) : ""}
         ${kind === "ssh" ? `<button class="session-agent-toggle" type="button" aria-pressed="false" aria-controls="automation-panel" title="Ask Claude Code or Codex to work on this server"><svg viewBox="0 0 24 24" aria-hidden="true">${UI_ICONS.agentFull}</svg><span>Agent</span></button>` : ""}
@@ -2829,20 +3347,41 @@ function initSessionToolbar(session) {
   });
   toolbar.querySelector(".session-paste").addEventListener("click", () => pasteTerminalClipboard(session));
   toolbar.querySelector(".session-find").addEventListener("click", () => openTerminalSearch(session));
+  toolbar.querySelector(".session-split-right").addEventListener("click", () => { activateSession(session.id, { focusTerminal: false }); showPaneSplit("right"); });
+  toolbar.querySelector(".session-split-below").addEventListener("click", () => { activateSession(session.id, { focusTerminal: false }); showPaneSplit("below"); });
+  toolbar.querySelector(".session-close-pane").addEventListener("click", () => closeTerminalPane(session.id));
   toolbar.querySelector(".btn-reconnect")?.addEventListener("click", () => reconnectSshSession(session));
-  toolbar.querySelector(".session-agent-toggle")?.addEventListener("click", () => toggleAgentPanel());
+  toolbar.querySelector(".session-shortcuts")?.addEventListener("click", () => {
+    activateSession(session.id, { focusTerminal: false });
+    openCommandPalette("session");
+  });
+  toolbar.querySelector(".session-agent-toggle")?.addEventListener("click", () => {
+    const alreadyActive = getActiveSession() === session;
+    activateSession(session.id, { focusTerminal: false });
+    if (alreadyActive) toggleAgentPanel(); else openAgentPanel();
+  });
+  toolbar.querySelector(".session-history-toggle")?.addEventListener("click", () => window.SleekSshHistory?.controller?.open());
   toolbar.querySelector(".session-sudo-password")?.addEventListener("click", async () => {
     await sendSudoPassword(session);
-    if (activeTabId === session.id && !session.isClosing) session.term.focus();
+    if (getActiveSession() === session && !session.isClosing) session.term.focus();
   });
   session.toolbarSelectionListener = session.term.onSelectionChange?.(() => updateSessionToolbar(session));
   updateSessionToolbar(session);
+}
+
+function updatePaneControls(session) {
+  if (!session?.container) return;
+  const hasSplit = getTabSessionIds(getSessionTabId(session.id)).length === 2;
+  session.container.querySelectorAll(".session-split-right, .session-split-below").forEach(button => { button.hidden = hasSplit; });
+  const closePaneButton = session.container.querySelector(".session-close-pane");
+  if (closePaneButton) closePaneButton.hidden = !hasSplit;
 }
 
 function updateSessionToolbar(session) {
   automationPanel?.refresh();
   const toolbar = session.container.querySelector(".session-toolbar");
   if (!toolbar) return;
+  updatePaneControls(session);
   const status = session.kind === "ssh" ? session.connectionStatus || "connecting"
     : session.isClosed ? "disconnected" : session.isReady ? "connected" : "connecting";
   const statusLabels = { connecting: "Connecting", reconnecting: "Reconnecting", connected: session.kind === "local" ? "Ready" : "Connected", disconnected: session.kind === "local" ? "Exited" : "Disconnected" };
@@ -2860,7 +3399,8 @@ function updateSessionToolbar(session) {
   session.term.options.disableStdin = status !== "connected" || session.isConnecting || session.isClosing;
   const filesButton = toolbar.querySelector(".session-files-toggle");
   if (session.kind === "ssh" && filesButton) {
-    const filesOpen = session.sftpPanelOpen && !session.container.classList.contains("sftp-auto-collapsed") && !agentUiState.open;
+    const filesOpen = session.sftpPanelOpen && !session.container.classList.contains("sftp-auto-collapsed") && !agentUiState.open
+      && document.getElementById("command-history-panel")?.hidden !== false;
     filesButton.setAttribute("aria-expanded", String(filesOpen));
     filesButton.title = filesOpen ? "Hide file browser" : "Show file browser";
   }
@@ -2883,7 +3423,8 @@ function updateSessionToolbar(session) {
   refreshWorkspaceChrome();
 }
 
-async function openLocalTerminal(shell, workingDirectory = null, locationName = null) {
+async function openLocalTerminal(shell, workingDirectory = null, locationName = null, paneDestination = null) {
+  validatePaneDestination(paneDestination);
   const shellLabel = LOCAL_TERMINAL_SHELLS[shell];
   if (!shellLabel) {
     showNotification("That local shell is not supported.");
@@ -2919,12 +3460,13 @@ async function openLocalTerminal(shell, workingDirectory = null, locationName = 
     search: createTerminalSearchState()
   };
   activeSessions[sessionId] = session;
-  switchTab(sessionId);
+  mountTerminalSession(session, paneDestination);
 
   const term = createTerminalForSession(session);
   initSessionToolbar(session);
   term.onData((data) => {
     if (session.isClosed || !session.isReady) return;
+    session.commandHistory?.handleInput(data);
 
     invoke("write_local_terminal", {
       sessionId,
@@ -2943,7 +3485,7 @@ async function openLocalTerminal(shell, workingDirectory = null, locationName = 
       rows: term.rows || LOCAL_TERMINAL_DEFAULT_ROWS
     });
 
-    if (!activeSessions[sessionId]) {
+    if (!activeSessions[sessionId] || session.isClosing) {
       await invoke("stop_local_terminal", { sessionId });
       return;
     }
@@ -2951,22 +3493,28 @@ async function openLocalTerminal(shell, workingDirectory = null, locationName = 
     session.isReady = true;
     updateSessionToolbar(session);
     fitTerminal(session);
-    term.focus();
+    if (getActiveSession() === session) term.focus();
   } catch (error) {
-    if (!activeSessions[sessionId]) return;
+    if (!activeSessions[sessionId] || session.isClosing) return;
 
+    session.launchError = String(error);
     session.isClosed = true;
     updateSessionToolbar(session);
     updateWorkspaceTabTitle(tabEl, "Terminal failed");
     markSessionTabAsDisconnected(sessionId);
     term.write(`\r\n\x1b[31m[Local terminal error: ${String(error)}]\x1b[0m\r\n`);
   }
+  return session;
 }
 
 // --- SSH CONNECTIONS ---
-async function connectProfile(profile) {
+async function connectProfile(profile, workspaceState = null, paneDestination = null) {
+  validatePaneDestination(paneDestination);
+  let startPath = null;
+  try { startPath = window.SleekSshRemoteFolders?.loadRemoteFolders(localStorage, profile.id).startPath || null; }
+  catch (error) { showNotification(`Could not load this host's remote folders: ${String(error)}`); return null; }
   welcomeScreen.classList.add("hidden");
-  const sessionId = profile.id + "_" + Date.now();
+  const sessionId = `${profile.id}_${crypto.randomUUID()}`;
   const savedSftpState = getSavedSftpExplorerState(profile.id);
 
   createWorkspaceTab(sessionId, "ssh", profile.name);
@@ -2988,8 +3536,10 @@ async function connectProfile(profile) {
     <aside class="sftp-panel" aria-label="Files on ${escapeHtml(profile.name)}">
       <div class="side-panel-header">
         <div class="side-panel-tabs" role="group" aria-label="Side panel">
-          <span class="side-panel-tab is-active" aria-current="true">${uiIcon("folder")}<span>Files</span></span>
-          <button class="side-panel-tab sftp-agent-tab" type="button" aria-pressed="false" title="Ask an agent to work on this server">${uiIcon("agentFull", "icon icon-agent")}<span>Agent</span><span class="attention-dot sftp-agent-attention" hidden></span></button>
+          <span class="side-panel-tab is-active" aria-current="true">Files</span>
+          <button class="side-panel-tab sftp-agent-tab" type="button" aria-pressed="false" title="Ask an agent to work on this server"><span>Agent</span><span class="attention-dot sftp-agent-attention" hidden></span></button>
+          <button class="side-panel-tab sftp-history-tab" type="button" aria-pressed="false">History</button>
+          <button class="side-panel-tab sftp-snippets-tab" type="button" aria-pressed="false">Snippets</button>
         </div>
         <button class="icon-button sftp-close" type="button" title="Hide files" aria-label="Hide files">${uiIcon("close")}</button>
       </div>
@@ -3020,9 +3570,6 @@ async function connectProfile(profile) {
   `;
   workspaceViewport.appendChild(sessionContainer);
 
-  // Switch to it immediately
-  switchTab(sessionId);
-
   // Mark in active sessions
   activeSessions[sessionId] = {
     id: sessionId,
@@ -3035,9 +3582,9 @@ async function connectProfile(profile) {
     isConnecting: false,
     isClosing: false,
     connectionId: null,
-    terminalPath: null,
-    currentPath: savedSftpState?.currentPath ?? null,
-    sftpPanelOpen: savedSftpState?.sftpPanelOpen ?? true,
+    terminalPath: workspaceState ? workspaceState.remotePath : startPath,
+    currentPath: workspaceState ? workspaceState.remotePath : startPath || savedSftpState?.currentPath || null,
+    sftpPanelOpen: workspaceState ? workspaceState.sftpPanelOpen : savedSftpState?.sftpPanelOpen ?? true,
     sftpStateKey: profile.id,
     sftpRequestId: 0,
     terminalInput: "",
@@ -3046,6 +3593,7 @@ async function connectProfile(profile) {
   };
 
   const session = activeSessions[sessionId];
+  mountTerminalSession(session, paneDestination);
   const term = createTerminalForSession(session);
   initSessionToolbar(session);
   initSessionPanelLayout(session);
@@ -3072,6 +3620,7 @@ async function connectProfile(profile) {
   initSftpForSession(session);
   term.onData(async (data) => {
     if (session.isClosed || session.isConnecting || session.isClosing) return;
+    session.commandHistory?.handleInput(data);
     resetSudoShortcut(session);
     const connectionId = session.connectionId;
     trackTerminalDirectoryChange(session, data);
@@ -3082,6 +3631,7 @@ async function connectProfile(profile) {
     }
   });
   await establishSshConnection(session);
+  return session;
 }
 
 const BASH_PROMPT_ARRAY_MINIMUM_MAJOR_VERSION = 5;
@@ -3111,8 +3661,10 @@ const TERMINAL_DIRECTORY_REPORTING_SCRIPT = [
 
 function createTerminalSetupCommand(restorePath) {
   // Keep shell-specific syntax inside eval so unsupported shells can skip it.
-  const reportingCommand = `if [ -n "\${BASH_VERSION-}\${ZSH_VERSION-}" ]; then eval ${quoteRemoteShellArgument(TERMINAL_DIRECTORY_REPORTING_SCRIPT)}; fi`;
-  const restoreCommand = restorePath ? `; cd ${quoteRemoteShellArgument(restorePath)}` : "";
+  const historyScript = window.SleekSshHistory?.SSH_COMMAND_HISTORY_SCRIPT ?? "";
+  const reportingCommand = `if [ -n "\${BASH_VERSION-}\${ZSH_VERSION-}" ]; then eval ${quoteRemoteShellArgument(TERMINAL_DIRECTORY_REPORTING_SCRIPT + historyScript)}; fi`;
+  const restoreCommand = restorePath ? `; ${restorePath.startsWith("~") && window.SleekSshRemoteFolders
+    ? window.SleekSshRemoteFolders.remoteFolderCommand(restorePath) : `cd ${quoteRemoteShellArgument(restorePath)}`}` : "";
   return `${reportingCommand}${restoreCommand}; if [ -n "\${BASH_VERSION-}\${ZSH_VERSION-}" ]; then __sleekssh_report_cwd; fi`;
 }
 
@@ -3286,15 +3838,16 @@ function setSshConnectionStatus(session, status, message) {
   statusElement.title = message;
   session.container.querySelector(".sftp-panel").inert = status !== "connected";
   session.term.options.disableStdin = status !== "connected";
-  const tabElement = document.querySelector(`.terminal-tab[data-id="${session.id}"]`);
+  const tabElement = document.querySelector(`.terminal-tab[data-id="${getSessionTabId(session.id)}"]`);
   tabElement?.classList.toggle("connection-terminated", status === "disconnected");
-  if (tabElement) updateWorkspaceTabTitle(tabElement, session.name);
+  if (tabElement) updatePaneTab(getSessionTabId(session.id));
   updateSessionToolbar(session);
   // The status banner takes a grid row above the terminal, so refit when it appears or goes away.
   if (bannerWasHidden !== statusElement.classList.contains("hidden") && session.fitAddon) fitTerminal(session);
 }
 
 function handleSshDisconnect(session, message) {
+  session.commandHistory?.reset();
   if (session.isClosing || session.connectionStatus === "disconnected") return;
   resetSudoShortcut(session);
   session.isClosed = true;
@@ -3317,6 +3870,8 @@ async function establishSshConnection(session, reconnecting = false) {
   const restorePath = session.terminalPath || session.currentPath;
   const profile = session.connectionProfile;
   session.connectionId = connectionId;
+  session.connectionError = null;
+  session.commandHistory?.reset();
   resetSudoShortcut(session);
   session.isConnecting = true;
   session.isClosed = true;
@@ -3356,10 +3911,11 @@ async function establishSshConnection(session, reconnecting = false) {
     setSshConnectionStatus(session, "connected", "Connected");
     fitTerminal(session);
     await loadSftpDirectory(session, session.terminalPath || REMOTE_HOME_DIRECTORY);
-    if (activeTabId === session.id && !session.isClosed) session.term.focus();
+    if (getActiveSession() === session && !session.isClosed) session.term.focus();
   } catch (error) {
     if (session.isClosing || activeSessions[session.id] !== session) return;
     console.error("SSH connection failed:", error);
+    session.connectionError = String(error);
     handleSshDisconnect(session, `Connection failed: ${error}`);
     try {
       await invoke("disconnect_ssh", { sessionId: connectionId });
@@ -3418,6 +3974,7 @@ function initConnectionListeners() {
     if (!session) return;
 
     session.isClosed = true;
+    session.commandHistory?.reset();
     markSessionTabAsDisconnected(payload.session_id);
     updateSessionToolbar(session);
     session.term?.write("\r\n\x1b[33m[Local shell exited]\x1b[0m\r\n");
@@ -3428,7 +3985,9 @@ function initConnectionListeners() {
     const session = activeSessions[payload.session_id];
     if (!session) return;
 
+    session.launchError = String(payload.data);
     session.isClosed = true;
+    session.commandHistory?.reset();
     markSessionTabAsDisconnected(payload.session_id);
     updateSessionToolbar(session);
     session.term?.write(`\r\n\x1b[31m[Local terminal error: ${payload.data}]\x1b[0m\r\n`);
@@ -3477,9 +4036,10 @@ function initSftpForSession(session) {
   };
 
   toggleBtn.addEventListener("click", () => {
-    // With the agent open, the files button brings the file browser back instead of hiding it.
-    if (agentUiState.open) {
+    // Returning from another side panel should reveal the existing file browser.
+    if (agentUiState.open || document.getElementById("command-history-panel")?.hidden === false) {
       closeAgentPanel();
+      window.SleekSshHistory?.controller?.close();
       if (!session.sftpPanelOpen) setFilesOpen(true);
       return;
     }
@@ -3491,7 +4051,18 @@ function initSftpForSession(session) {
     toggleBtn.focus();
   });
 
-  container.querySelector(".sftp-agent-tab")?.addEventListener("click", () => openAgentPanel());
+  container.querySelector(".sftp-agent-tab")?.addEventListener("click", () => {
+    activateSession(session.id, { focusTerminal: false });
+    openAgentPanel();
+  });
+  container.querySelector(".sftp-history-tab")?.addEventListener("click", () => {
+    activateSession(session.id, { focusTerminal: false });
+    window.SleekSshHistory?.controller?.open();
+  });
+  container.querySelector(".sftp-snippets-tab")?.addEventListener("click", () => {
+    activateSession(session.id, { focusTerminal: false });
+    window.SleekSshHistory?.controller?.openSnippets();
+  });
 
   const pathField = container.querySelector(".sftp-path");
   const setPathEditing = (editing) => {
@@ -3641,9 +4212,17 @@ function quoteRemoteShellArgument(value) {
 }
 
 async function synchronizeTerminalDirectory(session, path) {
-  if (!session.term || session.isClosed || session.terminalInput || session.isClosing) return;
-  const command = `cd ${quoteRemoteShellArgument(path)}\r`;
-  await invoke("write_ssh", { sessionId: session.connectionId, dataBase64: stringToBase64(command) });
+  if (!session.term || session.isClosed || session.isClosing || session.isConnecting || !session.connectionId) return;
+  const promptToken = session.commandHistory?.getPromptToken();
+  if (!promptToken) return;
+  const connectionId = session.connectionId;
+  const command = `cd ${quoteRemoteShellArgument(path)}`;
+  await session.commandHistory.sendSnippet(command, true, promptToken, async text => {
+    if (session.isClosed || session.isClosing || session.isConnecting || session.connectionId !== connectionId) {
+      throw new Error("The terminal connection changed before its directory could be synchronized.");
+    }
+    await invoke("write_ssh", { sessionId: connectionId, dataBase64: stringToBase64(text) });
+  });
 }
 
 function getTerminalCdPath(session, command) {
@@ -3712,7 +4291,8 @@ async function loadSftpDirectory(session, path, { syncTerminal = false } = {}) {
   }
 
   try {
-    const resolvedPath = await invoke("sftp_resolve_path", { sessionId: connectionId, path });
+    const remotePath = path === "~" ? REMOTE_HOME_DIRECTORY : path.startsWith("~/") ? `.${path.slice(1)}` : path;
+    const resolvedPath = await invoke("sftp_resolve_path", { sessionId: connectionId, path: remotePath });
     if (session.isClosed || connectionId !== session.connectionId || requestId !== session.sftpRequestId) return;
     const files = await invoke("sftp_list_directory", { sessionId: connectionId, path: resolvedPath });
     if (session.isClosed || requestId !== session.sftpRequestId) return;
@@ -3858,7 +4438,9 @@ function setChromeClass(element, className, enabled) {
 
 function setWorkspaceTabStatus(sessionId, status) {
   if (typeof document.querySelector !== "function") return;
-  setChromeAttribute(document.querySelector(`.terminal-tab[data-id="${sessionId}"]`), "data-status", status);
+  const tabId = getSessionTabId(sessionId);
+  setChromeAttribute(document.querySelector(`.terminal-tab[data-id="${tabId}"]`), "data-status", status);
+  if (terminalGroups?.get(tabId)?.sessionIds.length === 2) updatePaneTab(tabId);
 }
 
 function getSessionConnectionState(session) {
@@ -3879,7 +4461,7 @@ function findSessionsForProfile(profileId) {
 
 function openOrSwitchToProfile(profile) {
   const existing = findSessionsForProfile(profile.id).at(-1);
-  if (existing) switchTab(existing.id);
+  if (existing) activateSession(existing.id);
   else connectProfile(profile);
 }
 
@@ -3894,7 +4476,7 @@ function updateHostIndicators() {
     const current = states.get(profileId);
     if (!current || rank[state] > rank[current]) states.set(profileId, state);
   });
-  const activeSession = activeSessions[activeTabId];
+  const activeSession = getActiveSession();
   const activeProfileId = activeSession?.kind === "ssh" ? activeSession.connectionProfile?.id : null;
   const stateLabels = { connected: ", connected", connecting: ", connecting", disconnected: ", disconnected" };
   document.querySelectorAll(".profile-item[data-profile-id]").forEach(item => {
@@ -3923,7 +4505,7 @@ function getVpnDisplayName() {
 
 function refreshWorkspaceChrome() {
   if (typeof document.getElementById !== "function") return;
-  const activeSession = activeSessions[activeTabId];
+  const activeSession = getActiveSession();
 
   const connectionLabel = document.getElementById("status-connection-label");
   if (connectionLabel) {
@@ -3962,22 +4544,30 @@ function refreshWorkspaceChrome() {
   setChromeAttribute(document.getElementById("rail-vpn-badge"), "data-state", vpnState);
 
   const agentOpen = Boolean(agentUiState.open);
+  if (typeof window !== "undefined") window.SleekSshHistory?.controller?.refresh();
   if (typeof document.querySelector === "function") setChromeClass(document.querySelector(".app-container"), "agent-open", agentOpen);
   const attention = document.getElementById("automation-attention");
   if (attention) attention.hidden = !agentUiState.review;
-  const filesTab = document.getElementById("automation-files-tab");
-  if (filesTab) {
+  const filesTabs = typeof document.querySelectorAll === "function"
+    ? document.querySelectorAll('#automation-files-tab, [data-automation-control="automation-files-tab"]')
+    : [document.getElementById("automation-files-tab")].filter(Boolean);
+  filesTabs.forEach(filesTab => {
     filesTab.disabled = activeSession?.kind !== "ssh";
     filesTab.title = activeSession?.kind === "ssh" ? "Show files for this server" : "Files are available for SSH sessions";
-  }
+  });
   if (typeof document.querySelectorAll === "function") {
-    document.querySelectorAll(".session-agent-toggle").forEach(button => setChromeAttribute(button, "aria-pressed", String(agentOpen)));
-    document.querySelectorAll(".sftp-agent-attention").forEach(dot => { dot.hidden = !agentUiState.review; });
-    const agentSession = agentUiState.running && agentUiState.targetSessionId
-      ? Object.values(activeSessions).find(session => session.kind === "ssh" && session.connectionId === agentUiState.targetSessionId)
-      : null;
+    const states = automationPanel?.states?.() ?? [];
+    document.querySelectorAll(".session-agent-toggle").forEach(button => {
+      const session = activeSessions[button.closest?.(".session-container")?.dataset.id];
+      setChromeAttribute(button, "aria-pressed", String(agentOpen && session === activeSession));
+    });
+    document.querySelectorAll(".sftp-agent-attention").forEach(dot => {
+      const sessionKey = dot.closest?.(".session-container")?.dataset.id;
+      dot.hidden = !states.some(state => state.sessionKey === sessionKey && state.review);
+    });
     document.querySelectorAll(".terminal-tab").forEach(tab => {
-      setChromeClass(tab, "has-agent", Boolean(agentSession) && tab.getAttribute?.("data-id") === agentSession.id);
+      const sessions = getTabSessionIds(tab.getAttribute?.("data-id"));
+      setChromeClass(tab, "has-agent", states.some(state => state.running && sessions.includes(state.sessionKey)));
     });
   }
 
@@ -4027,10 +4617,11 @@ function initWorkspaceChrome() {
   document.getElementById("btn-command-palette")?.addEventListener("click", () => openCommandPalette("all"));
   document.getElementById("status-palette")?.addEventListener("click", () => openCommandPalette("all"));
   document.getElementById("status-vpn")?.addEventListener("click", () => activateSidebarView("vpn", { keepOpen: true }));
-  document.getElementById("automation-files-tab")?.addEventListener("click", () => {
-    const session = activeSessions[activeTabId];
+  if (!automationPanel?.states) document.getElementById("automation-files-tab")?.addEventListener("click", () => {
+    const session = getActiveSession();
     if (session?.kind !== "ssh") return;
     closeAgentPanel();
+    window.SleekSshHistory?.controller?.close();
     if (!session.sftpPanelOpen) session.container.querySelector(".session-files-toggle")?.click();
     session.container.querySelector(".sftp-close")?.focus();
   });
@@ -4060,6 +4651,7 @@ function initWorkspaceChrome() {
 // --- COMMAND PALETTE ---
 function openCommandPalette(mode = "all") {
   if (commandPalette) {
+    if (mode === "session") sessionPaletteSession = getActiveSession();
     closeOpenMenus();
     commandPalette.open(mode);
     return;
@@ -4079,7 +4671,7 @@ function readSavedLocalLocations() {
 
 function buildCommandPaletteItems() {
   const items = [];
-  const activeSession = activeSessions[activeTabId];
+  const activeSession = getActiveSession();
   const hostRank = profile => (findSessionsForProfile(profile.id).length ? 0 : 1);
   [...savedProfiles]
     .sort((left, right) => hostRank(left) - hostRank(right) || left.name.localeCompare(right.name))
@@ -4102,6 +4694,19 @@ function buildCommandPaletteItems() {
 
   items.push({ id: "shell:powershell", group: "Local shells", title: "PowerShell", icon: "terminal", shortcut: ["Ctrl", "Alt", "T"], hint: "Open", run: () => openLocalTerminal("powershell") });
   items.push({ id: "shell:cmd", group: "Local shells", title: "Command Prompt", icon: "terminal", hint: "Open", run: () => openLocalTerminal("cmd") });
+
+  if (savedWorkspaces) {
+    try {
+      savedWorkspaces.list().forEach(workspace => items.push({
+        id: `workspace:${workspace.id}`, group: "Workspaces", title: workspace.name,
+        subtitle: `${workspace.tabs.length} saved tabs`, icon: "folder", hint: "Open workspace",
+        keywords: "saved workspace layout",
+        run: () => savedWorkspaces.open(workspace.id)
+      }));
+    } catch (error) { showNotification(`Saved workspaces could not be read: ${String(error)}`); }
+    items.push({ id: "workspace:save", group: "Workspaces", title: "Save current workspace", icon: "folder", run: showWorkspaceSave });
+    items.push({ id: "workspace:manage", group: "Workspaces", title: "Manage saved workspaces", icon: "folder", run: () => activateSidebarView("workspaces", { keepOpen: true }) });
+  }
   readSavedLocalLocations().forEach(location => {
     items.push({
       id: `location:${location.id}`,
@@ -4116,14 +4721,23 @@ function buildCommandPaletteItems() {
   });
 
   const actions = [];
+  actions.push({ id: "action:snippets", title: "Named snippets", detail: "Saved command templates and parameters", icon: "terminal", run: () => window.SleekSshHistory?.controller?.openSnippets() });
   if (activeSession?.kind === "ssh" && activeSession.connectionStatus === "disconnected") {
     actions.push({ id: "action:reconnect", title: `Reconnect ${activeSession.name}`, icon: "refresh", run: () => reconnectSshSession(activeSession) });
   }
   if (activeSession?.kind === "ssh") {
+    actions.push({ id: "action:ssh-palette", title: "SSH session palette", detail: "Folders and snippets for this SSH session", icon: "folder", keywords: "remote locations shortcuts", shortcut: ["Ctrl", "Shift", "K"], run: () => openCommandPalette("session") });
     actions.push({ id: "action:agent", title: agentUiState.open ? "Hide the agent" : "Ask the agent to work on this server", detail: "Claude Code or Codex", icon: "agent", run: toggleAgentPanel });
   }
   if (activeSession?.term) {
     actions.push({ id: "action:find", title: "Find in terminal", icon: "search", shortcut: ["Ctrl", "F"], run: () => openTerminalSearch(activeSession) });
+    if (getTabSessionIds(activeTabId).length === 1) {
+      actions.push({ id: "action:split-right", title: "Split right", detail: "Open an SSH host or local shell beside this terminal", icon: "panel", run: () => showPaneSplit("right") });
+      actions.push({ id: "action:split-below", title: "Split below", detail: "Open an SSH host or local shell below this terminal", icon: "panel", run: () => showPaneSplit("below") });
+    } else {
+      actions.push({ id: "action:focus-pane", title: "Focus other pane", icon: "panel", shortcut: ["Ctrl", "Alt", "Arrow"], run: focusOtherPane });
+      actions.push({ id: "action:close-pane", title: `Close ${activeSession.paneLabel || "active pane"}`, icon: "close", shortcut: ["Ctrl", "Alt", "W"], run: () => closeTerminalPane(activeSession.id) });
+    }
   }
   actions.push({ id: "action:new-host", title: "New host", detail: "Save a server to Hosts", icon: "plus", run: () => showProfileModal() });
   actions.push({ id: "action:quick-connect", title: "Quick connect form", detail: "Key file, passphrase or password", icon: "form", keywords: "connect ssh password", run: () => showQuickConnectModal() });
@@ -4137,9 +4751,76 @@ function buildCommandPaletteItems() {
   actions.push({ id: "action:sidebar", title: isSidebarVisible() ? "Hide sidebar" : "Show sidebar", icon: "panel", run: toggleSidebarPanel });
   actions.push({ id: "action:settings", title: "Settings", detail: "Font size, zoom, SSH defaults", icon: "gear", run: openSettingsTab });
   if (activeSession) {
-    actions.push({ id: "action:close-tab", title: `Close ${activeSession.name}`, icon: "close", shortcut: ["Ctrl", "W"], run: () => closeTab(activeSession.id) });
+    actions.push({ id: "action:close-tab", title: "Close current tab", icon: "close", shortcut: ["Ctrl", "W"], run: () => closeTab(getSessionTabId(activeSession.id)) });
   }
   actions.forEach(action => items.push({ group: "Actions", ...action }));
+  return items;
+}
+
+function buildSessionPaletteItems() {
+  const session = sessionPaletteSession;
+  if (!session || session.kind !== "ssh" || session.isClosing) return [];
+  const profile = savedProfiles.find(item => item.id === session.connectionProfile?.id);
+  const items = [];
+  const report = error => showNotification(String(error));
+  const openFolder = async path => {
+    try {
+      const connectionId = session.connectionId;
+      const resolved = await window.SleekSshRemoteFolders.navigateRemoteFolder({
+        session, getSession: getActiveSession, path,
+        resolvePath: (sessionId, remotePath) => invoke("sftp_resolve_path", { sessionId, path: remotePath }),
+        writeText: (sessionId, text) => invoke("write_ssh", { sessionId, dataBase64: stringToBase64(text) })
+      });
+      if (getActiveSession() === session && session.connectionId === connectionId && !session.isClosed && !session.isClosing) {
+        await loadSftpDirectory(session, resolved);
+      }
+    } catch (error) { report(error); }
+  };
+  if (profile && window.SleekSshRemoteFolders) {
+    try {
+      const settings = window.SleekSshRemoteFolders.loadRemoteFolders(localStorage, profile.id);
+      const folders = settings.startPath && !settings.folders.some(folder => folder.path === settings.startPath)
+        ? [{ name: "Starting folder", path: settings.startPath }, ...settings.folders] : settings.folders;
+      folders.forEach((folder, index) => items.push({
+        id: `remote-folder:${session.id}:${index}`, group: "Remote folders", title: folder.name, subtitle: folder.path,
+        keywords: `folder directory location cd ${folder.path}`, icon: "folder", hint: "Go to folder",
+        detail: folder.path === settings.startPath ? "Starting folder" : "",
+        run: () => openFolder(folder.path)
+      }));
+    } catch (error) { report(error); }
+    items.push({
+      id: "session:save-folder", group: "This session", title: "Save current folder…", icon: "plus",
+      subtitle: session.terminalPath || session.currentPath || "Enter a remote folder path", keywords: "bookmark location directory",
+      run: () => {
+        try {
+          if (!remoteFolderDialog) throw new Error("Remote folder controls are unavailable. Restart SleekSSH.");
+          remoteFolderDialog.open(profile.id, `${profile.name} · ${profile.username}@${profile.host}:${profile.port}`,
+            session.terminalPath || session.currentPath || "");
+        } catch (error) { report(error); }
+      }
+    });
+    items.push({ id: "session:folders", group: "This session", title: "Manage saved folders", icon: "folder", run: () => showProfileModal(profile) });
+  } else {
+    items.push({ id: "session:save-host", group: "This session", title: "Save this host to keep folder shortcuts", icon: "plus",
+      run: () => showProfileModal(null, { ...session.connectionProfile, name: session.name }) });
+  }
+  try {
+    window.SleekSshHistory?.controller?.listSnippets(session).filter(snippet => snippet.shell === "posix").forEach(snippet => items.push({
+      id: `session-snippet:${snippet.id}`, group: snippet.folder ? "Folder snippets" : "Shared snippets", title: snippet.name, subtitle: snippet.template,
+      detail: snippet.folder?.path || "Shared", keywords: "snippet command", icon: "terminal",
+      run: () => {
+        try {
+          if (getActiveSession() !== session || session.isClosed || session.isClosing || session.isConnecting) {
+            throw new Error("Select the original SSH session and open its palette again.");
+          }
+          window.SleekSshHistory.controller.openSnippets(snippet.id);
+        } catch (error) { report(error); }
+      }
+    }));
+  } catch (error) { report(error); }
+  items.push({ id: "session:snippets", group: "This session", title: "Manage snippets", icon: "terminal",
+    run: () => window.SleekSshHistory?.controller?.openSnippets() });
+  items.push({ id: "session:global", group: "This session", title: "All hosts and commands", icon: "search", run: () => openCommandPalette("all") });
   return items;
 }
 
@@ -4233,9 +4914,22 @@ function initCommandPaletteIntegration() {
   commandPalette = window.SleekSshCommandPalette.initCommandPalette({
     root,
     getItems: buildCommandPaletteItems,
+    getSessionItems: buildSessionPaletteItems,
+    getSessionLabel: () => {
+      const session = sessionPaletteSession;
+      const profile = session?.connectionProfile;
+      return session && profile ? `${session.paneLabel ? `${session.paneLabel} · ` : ""}${session.name} · ${profile.username}@${profile.host}:${profile.port}` : "SSH session";
+    },
     getConnectItems: buildQuickConnectPaletteItems,
     connectNote: "A server you have not trusted yet shows its SHA256 fingerprint before you log in. Compare it with a trusted source, then choose Trust and connect."
   });
+  const folderDialogRoot = document.getElementById("remote-folder-dialog");
+  if (folderDialogRoot && window.SleekSshRemoteFolders) {
+    remoteFolderDialog = window.SleekSshRemoteFolders.initRemoteFolderDialog({
+      root: folderDialogRoot, storage: localStorage,
+      onSaved: () => showNotification("Remote folder saved to this host's session palette.")
+    });
+  }
 }
 
 // --- PORT KILLER ---

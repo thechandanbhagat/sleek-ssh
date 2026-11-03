@@ -96,6 +96,7 @@ pub fn run() {
             automation::respond_automation_approval,
             automation::respond_automation_sudo_consent,
             automation_sessions::list_local_agent_sessions,
+            automation_sessions::get_local_agent_history,
             commands::select_key_file,
             commands::get_default_ssh_keys,
             commands::generate_new_ssh_key,

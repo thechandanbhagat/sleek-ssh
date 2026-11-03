@@ -1,3 +1,34 @@
+# SleekSSH v0.4.0
+
+Unreleased. Documentation reviewed 2 November 2026; repository maintainers review these notes before publication.
+
+## What's new
+
+- **Consistent side panels:** Files, Agent, History, and Snippets use the same saved width. Resize any panel with its divider or keyboard controls. Snippets has its own top-level tab, and saved workspaces restore it as the selected panel.
+- **Split terminals:** Open two independent SSH or local terminals in a tab with **Split right** or **Split below**. Resize the divider, switch focus with **Ctrl+Alt+Arrow**, and close one pane with **Ctrl+Alt+W**. Files, History, snippets, and new Agent tasks follow the focused pane.
+- **Command history and suggestions:** Search terminal and executed Agent commands in last-used order, newest first. Compact rows keep commands, run counts, and snippet actions together; terminal/Agent totals appear on the count tooltip. History persists per server or local shell. Faint inline suggestions accept **Tab** and dismiss with **Esc**; a leading space excludes a command from history. Password responses and recognized inline credentials are excluded.
+- **Named snippets:** Save commands as reusable templates with `{{parameters}}`. Review the rendered command, target pane, and shell before inserting or running it. Snippets can be shared or limited to an SSH server and folder, including subfolders. Preview expiry prevents a changed target or prompt from reusing an earlier review.
+- **Saved workspaces:** Save and reopen terminal tabs, launch folders, remote folders, split direction and size, active pane, and panel layout. Reopening appends fresh sessions and reports missing hosts or connection failures individually. Workspaces reference saved hosts without storing their credentials.
+- **Remote folders and SSH palette:** Save named remote folders and an optional starting folder per host. Use **Ctrl+Shift+K** to find the active server's folders and snippets; **Ctrl+Shift+P** continues to open the global palette.
+- **Agent follow-ups:** Queue up to 20 prompts per SSH chat, reorder them, and pause or resume the queue. **Enter** runs or queues a prompt, **Shift+Enter** inserts a newline, and **Ctrl+Enter** stops the current task and continues its chat with a steering instruction once a conversation ID is available. Failures, Stop, and connection changes pause queued work.
+- **Independent Agent sessions:** Keep drafts, approvals, transcripts, and Stop controls with their owning SSH session. Different sessions can run concurrently, while a local chat stays attached to one session. Recent messages from existing Claude Code and Codex chats load from local CLI history; displayed transcripts are saved locally with bounded size.
+
+## Fixes
+
+- **Large SSH setup scripts:** Terminal initialization sends bounded UTF-8 chunks so canonical terminal input limits cannot truncate shell history integration or the sudo wrapper.
+- **Accurate Agent history:** Commands enter shared history only after remote execution starts, and command results retain their execution identifiers.
+- **Session targeting:** Tab and pane changes preserve the target of running Agent tasks and invalidate stale snippet previews.
+
+## Upgrade and requirements
+
+This version is prepared for review; v0.4.0 installers have not been published. Build from source using the [development instructions](README.md#development). Published v0.3.0 downloads remain linked below.
+
+Saved hosts and encrypted credentials continue to use the existing application data. History, snippets, remote folder shortcuts, and workspaces are stored locally. Older single-pane saved workspaces remain readable; updating their format preserves a version 1 backup. Workspaces start fresh terminals without resuming remote processes or Agent tasks.
+
+Claude Code or Codex still requires a locally installed, authenticated CLI. Every remote command requires approval, and saved sudo-password use requires separate consent for the run. Existing command, run, and approval time limits remain unchanged.
+
+---
+
 # SleekSSH v0.3.0
 
 Released 27 October 2026.
