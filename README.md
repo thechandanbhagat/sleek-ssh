@@ -14,13 +14,11 @@ While SleekSSH is running, **Ctrl+Alt+T** brings it forward and opens PowerShell
 
 See the [release notes](RELEASE_NOTES.md) and [all releases](https://github.com/thechandanbhagat/sleek-ssh/releases).
 
-## Demo video
+## Demo
 
-[![Watch the SleekSSH v0.3.0 demo](docs/demo/youtube-thumbnail.jpg)](https://www.youtube.com/watch?v=3Km52Ny7FfY)
+[Demo](https://www.youtube.com/watch?v=3Km52Ny7FfY)
 
-A two-minute narrated product demo with animated UI, saved PowerShell locations, remote files, and command approval, using fictional demo data.
-
-[Watch on YouTube](https://www.youtube.com/watch?v=3Km52Ny7FfY) | [Download the MP4](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.3.0/sleekssh-product-demo-v0.3.0-final.mp4)
+See SSH sessions, saved PowerShell locations, remote files, and command approval in one workspace.
 
 ## Screenshots
 
