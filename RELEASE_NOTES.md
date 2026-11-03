@@ -1,6 +1,6 @@
 # SleekSSH v0.4.0
 
-Unreleased. Documentation reviewed 2 November 2026; repository maintainers review these notes before publication.
+Released 3 November 2026. Documentation owner: repository maintainers; review on every release.
 
 ## What's new
 
@@ -21,11 +21,19 @@ Unreleased. Documentation reviewed 2 November 2026; repository maintainers revie
 
 ## Upgrade and requirements
 
-This version is prepared for review; v0.4.0 installers have not been published. Build from source using the [development instructions](README.md#development). Published v0.3.0 downloads remain linked below.
+Close SleekSSH before installing either Windows x64 installer, then reopen it. To build from source, follow the [development instructions](README.md#development).
 
 Saved hosts and encrypted credentials continue to use the existing application data. History, snippets, remote folder shortcuts, and workspaces are stored locally. Older single-pane saved workspaces remain readable; updating their format preserves a version 1 backup. Workspaces start fresh terminals without resuming remote processes or Agent tasks.
 
 Claude Code or Codex still requires a locally installed, authenticated CLI. Every remote command requires approval, and saved sudo-password use requires separate consent for the run. Existing command, run, and approval time limits remain unchanged.
+
+## Windows x64 downloads
+
+- [MSI installer](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.4.0/SleekSSH_0.4.0_x64_en-US.msi): `SleekSSH_0.4.0_x64_en-US.msi`
+- [EXE installer](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.4.0/SleekSSH_0.4.0_x64-setup.exe): `SleekSSH_0.4.0_x64-setup.exe`
+- [SHA-256 checksums](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.4.0/SHA256SUMS.txt): `SHA256SUMS.txt`
+
+[Full changelog: v0.3.0...v0.4.0](https://github.com/thechandanbhagat/sleek-ssh/compare/v0.3.0...v0.4.0).
 
 ---
 

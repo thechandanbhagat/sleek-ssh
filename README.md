@@ -2,13 +2,11 @@
 
 A Windows desktop workspace for SSH sessions, local terminals, SFTP, and command-by-command Claude Code or Codex automation.
 
-<!-- Documentation owner: repository maintainers. Reviewed for v0.4.0 on 2026-11-02; review on every release. -->
+<!-- Documentation owner: repository maintainers. Reviewed for v0.4.0 on 2026-11-03; review on every release. -->
 
 ## Quick start
 
-**v0.4.0 is unreleased.** To try the features documented below, build this branch using [Development](#development). The latest published Windows installers are v0.3.0.
-
-1. Install **SleekSSH v0.3.0** for Windows x64: [MSI installer](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.3.0/SleekSSH_0.3.0_x64_en-US.msi) or [EXE installer](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.3.0/SleekSSH_0.3.0_x64-setup.exe).
+1. Install **SleekSSH v0.4.0** for Windows x64: [MSI installer](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.4.0/SleekSSH_0.4.0_x64_en-US.msi) or [EXE installer](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.4.0/SleekSSH_0.4.0_x64-setup.exe). [SHA-256 checksums](https://github.com/thechandanbhagat/sleek-ssh/releases/download/v0.4.0/SHA256SUMS.txt) are available for both installers.
 2. Launch SleekSSH. In **Local shells**, open PowerShell or Command Prompt; use **Hosts** to add an SSH profile with your server, username, and password or private key.
 3. For a new SSH server, compare its displayed fingerprint with a trusted source before accepting it.
 
